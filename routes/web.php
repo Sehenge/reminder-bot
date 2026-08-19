@@ -13,4 +13,4 @@ Route::get('/', function () {
 });
 
 // Наш эндпоинт для вебхука Telegram
-Route::post('/webhook/telegram', [TelegramWebhookController::class, 'handle'])->name('telegram.webhook');
+Route::post('/webhook/telegram', TelegramWebhookController::class)->name('telegram.webhook');

@@ -2,8 +2,10 @@
 
 namespace App\Jobs;
 
+use App\Events\ReminderNotificationSent;
 use App\Models\Reminder;
 use App\Services\TelegramService;
+use App\Telegram\Presenters\ReminderMessagePresenter;
 use Carbon\Carbon;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -53,6 +55,7 @@ class SendReminderNotificationJob implements ShouldQueue
      */
     public function handle(TelegramService $telegram): void
     {
+        $presenter = app(ReminderMessagePresenter::class);
         // Всегда перечитываем актуальное состояние из БД: модель могла быть
         // сериализована в очередь ранее, а её статус — измениться с тех пор.
         $reminder = $this->reminder->fresh();
@@ -76,39 +79,7 @@ class SendReminderNotificationJob implements ShouldQueue
             return;
         }
 
-        $localTime = Carbon::parse($reminder->target_at)->setTimezone($user->timezone);
-        $formattedTime = $localTime->format('H:i');
-
-        // Создаем сообщение уведомления
-        $text = "🔔 <b>НАПОМИНАНИЕ!</b> 🔔\n\n"
-              .'📌 Текст: <b>'.e($reminder->text)."</b>\n"
-              ."⏰ Время: <b>{$formattedTime}</b>\n\n"
-              .'Пожалуйста, выполните или отложите эту задачу.';
-
-        // Готовим inline-кнопки (Выполнено, Отложить на 10м/30м/1ч/до завтра, Удалить).
-        // Суффикс "tomorrow" у snooze специально нечисловой (в отличие от 10/30/60) —
-        // обработчик в контроллере распознаёт его до приведения к (int).
-        $buttons = [
-            [
-                ['text' => '✅ Выполнено', 'callback_data' => "complete_{$reminder->id}"],
-                ['text' => '⏳ 10м', 'callback_data' => "snooze_{$reminder->id}_10"],
-                ['text' => '⏳ 30м', 'callback_data' => "snooze_{$reminder->id}_30"],
-            ],
-            [
-                ['text' => '⏳ 1ч', 'callback_data' => "snooze_{$reminder->id}_60"],
-                ['text' => '⏳ До завтра', 'callback_data' => "snooze_{$reminder->id}_tomorrow"],
-            ],
-            [
-                ['text' => '❌ Удалить', 'callback_data' => "delete_{$reminder->id}"],
-            ],
-        ];
-
-        // Отправляем через Telegram Service
-        $response = $telegram->sendMessage([
-            'chat_id' => $user->telegram_id,
-            'text' => $text,
-            'reply_markup' => json_encode(['inline_keyboard' => $buttons]),
-        ]);
+        $response = $telegram->sendMessage($presenter->notification($reminder, $user));
 
         if (! (isset($response['ok']) && $response['ok'])) {
             $description = is_string($response['description'] ?? null) ? $response['description'] : 'unknown error';
@@ -122,6 +93,7 @@ class SendReminderNotificationJob implements ShouldQueue
 
         $messageId = $response['result']['message_id'] ?? null;
         $sentAt = Carbon::now();
+        ReminderNotificationSent::dispatch($reminder);
 
         // Если это повторяющееся напоминание — рассчитываем следующее время
         if ($reminder->recurrence_type !== 'once') {

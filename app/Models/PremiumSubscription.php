@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Enums\PremiumStatus;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -22,6 +23,7 @@ class PremiumSubscription extends Model
         'expires_at' => 'datetime',
         'stars_amount' => 'integer',
         'user_id' => 'integer',
+        'status' => PremiumStatus::class,
     ];
 
     /**
