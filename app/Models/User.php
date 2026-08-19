@@ -81,6 +81,12 @@ class User extends Model
         return $this->hasMany(PremiumPaymentEvent::class);
     }
 
+    /** @return HasMany<PaymentSupportRequest, $this> */
+    public function paymentSupportRequests(): HasMany
+    {
+        return $this->hasMany(PaymentSupportRequest::class);
+    }
+
     /**
      * Проверка, есть ли у пользователя активный премиум-статус
      */

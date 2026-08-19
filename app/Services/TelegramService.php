@@ -66,6 +66,14 @@ class TelegramService
         return $this->call('answerPreCheckoutQuery', $params);
     }
 
+    public function refundStarPayment(int $userId, string $chargeId): array
+    {
+        return $this->call('refundStarPayment', [
+            'user_id' => $userId,
+            'telegram_payment_charge_id' => $chargeId,
+        ]);
+    }
+
     /**
      * Установка вебхука бота
      */

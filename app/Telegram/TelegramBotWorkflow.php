@@ -21,6 +21,7 @@ use App\Models\User;
 use App\Services\CalendarExportService;
 use App\Services\CategoryService;
 use App\Services\NaturalLanguageParserService;
+use App\Services\PaymentSupportService;
 use App\Services\PremiumPaymentService;
 use App\Services\ReminderHistoryService;
 use App\Services\SharedListService;
@@ -62,6 +63,7 @@ class TelegramBotWorkflow
         protected SharedListService $sharedLists,
         protected CalendarExportService $calendar,
         protected ReminderHistoryService $history,
+        protected PaymentSupportService $paymentSupport,
     ) {
         $this->telegram = $telegram;
         $this->parser = $parser;
@@ -138,6 +140,9 @@ class TelegramBotWorkflow
                     break;
                 case '/premium':
                     $this->sendPremiumMessage($user, $chatId);
+                    break;
+                case '/paysupport':
+                    $this->handlePaymentSupport($user, $chatId, $arguments);
                     break;
                 case '/timezone':
                     $this->askTimezone($user, $chatId);
@@ -691,6 +696,7 @@ class TelegramBotWorkflow
               ."/help — Список всех команд и примеры использования\n"
               ."/list — Показать список активных и выполненных напоминаний\n"
               ."/premium — Подписка Премиум и покупка за Telegram Stars\n"
+              ."/paysupport — Помощь с оплатой и возвратами\n"
               ."/timezone — Настройка часового пояса\n\n"
               ."/categories — Категории Premium\n"
               ."/tags — Теги Premium\n"
@@ -1348,5 +1354,24 @@ class TelegramBotWorkflow
     private function sendText(int $chatId, string $text): void
     {
         $this->telegram->sendMessage(['chat_id' => $chatId, 'text' => $text]);
+    }
+
+    private function handlePaymentSupport(User $user, int $chatId, string $message): void
+    {
+        if ($message === '') {
+            $this->sendText(
+                $chatId,
+                "Опишите проблему после команды, например:\n<code>/paysupport Оплата прошла, но Premium не появился</code>\n\nУкажите детали, но не отправляйте пароли, коды или данные банковской карты.",
+            );
+
+            return;
+        }
+
+        try {
+            $request = $this->paymentSupport->open($user, $message);
+            $this->sendText($chatId, "Обращение по оплате #{$request->id} зарегистрировано. Мы проверим операцию и ответим вам в Telegram.");
+        } catch (InvalidArgumentException) {
+            $this->sendText($chatId, 'Сообщение должно содержать от 1 до 2000 символов.');
+        }
     }
 }
