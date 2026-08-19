@@ -6,6 +6,7 @@ use Carbon\Carbon;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
+use Illuminate\Database\Eloquent\Relations\BelongsToMany;
 
 class Reminder extends Model
 {
@@ -34,6 +35,7 @@ class Reminder extends Model
     protected $fillable = [
         'user_id',
         'category_id',
+        'shared_list_id',
         'text',
         'target_at',
         'recurrence_type',
@@ -53,6 +55,7 @@ class Reminder extends Model
         'completed_at' => 'datetime',
         'user_id' => 'integer',
         'category_id' => 'integer',
+        'shared_list_id' => 'integer',
         'telegram_message_id' => 'integer',
         'sent_at' => 'datetime',
     ];
@@ -71,6 +74,18 @@ class Reminder extends Model
     public function category(): BelongsTo
     {
         return $this->belongsTo(Category::class);
+    }
+
+    /** @return BelongsTo<SharedList, $this> */
+    public function sharedList(): BelongsTo
+    {
+        return $this->belongsTo(SharedList::class);
+    }
+
+    /** @return BelongsToMany<Tag, $this> */
+    public function tags(): BelongsToMany
+    {
+        return $this->belongsToMany(Tag::class);
     }
 
     /**

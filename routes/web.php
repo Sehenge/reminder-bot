@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\CalendarFeedController;
 use App\Http\Controllers\TelegramWebhookController;
 use Illuminate\Support\Facades\Route;
 
@@ -14,3 +15,6 @@ Route::get('/', function () {
 
 // Наш эндпоинт для вебхука Telegram
 Route::post('/webhook/telegram', TelegramWebhookController::class)->name('telegram.webhook');
+Route::get('/calendar/{token}.ics', CalendarFeedController::class)
+    ->where('token', '[A-Za-z0-9]{48}')
+    ->name('calendar.feed');

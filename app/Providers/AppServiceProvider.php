@@ -3,6 +3,8 @@
 namespace App\Providers;
 
 use App\Contracts\ReminderParserFallback;
+use App\Models\Reminder;
+use App\Observers\ReminderObserver;
 use App\Services\NullReminderParserFallback;
 use Illuminate\Support\ServiceProvider;
 
@@ -23,6 +25,6 @@ class AppServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
-        //
+        Reminder::observe(ReminderObserver::class);
     }
 }

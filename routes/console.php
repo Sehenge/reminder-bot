@@ -16,3 +16,7 @@ Schedule::command('reminders:dispatch')
     ->everyMinute()
     ->withoutOverlapping()
     ->runInBackground();
+
+Schedule::command('reminders:prune-history')
+    ->dailyAt('03:30')
+    ->withoutOverlapping();

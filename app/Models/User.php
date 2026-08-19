@@ -10,6 +10,8 @@ class User extends Model
 {
     use HasFactory;
 
+    protected $hidden = ['calendar_token'];
+
     protected $fillable = [
         'telegram_id',
         'username',
@@ -19,6 +21,7 @@ class User extends Model
         'timezone',
         'is_premium',
         'premium_expires_at',
+        'calendar_token',
         'state',
         'state_data',
     ];
@@ -44,6 +47,24 @@ class User extends Model
     public function categories(): HasMany
     {
         return $this->hasMany(Category::class);
+    }
+
+    /** @return HasMany<Tag, $this> */
+    public function tags(): HasMany
+    {
+        return $this->hasMany(Tag::class);
+    }
+
+    /** @return HasMany<SharedList, $this> */
+    public function ownedSharedLists(): HasMany
+    {
+        return $this->hasMany(SharedList::class, 'owner_id');
+    }
+
+    /** @return HasMany<SharedListMember, $this> */
+    public function sharedListMemberships(): HasMany
+    {
+        return $this->hasMany(SharedListMember::class);
     }
 
     /**

@@ -19,7 +19,7 @@ final class ReminderMessagePresenter
         $time = $reminder->target_at->copy()->setTimezone($user->timezone)->format('H:i');
 
         return [
-            'chat_id' => $user->telegram_id,
+            'chat_id' => $reminder->sharedList?->telegram_chat_id ?: $user->telegram_id,
             'text' => "🔔 <b>НАПОМИНАНИЕ!</b> 🔔\n\n📌 Текст: <b>".e($reminder->text)."</b>\n⏰ Время: <b>{$time}</b>\n\nПожалуйста, выполните или отложите эту задачу.",
             'reply_markup' => json_encode(['inline_keyboard' => [
                 [

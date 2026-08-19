@@ -10,16 +10,27 @@ use App\DTO\CallbackQueryDTO;
 use App\DTO\PreCheckoutQueryDTO;
 use App\DTO\RefundedPaymentDTO;
 use App\DTO\SuccessfulPaymentDTO;
+use App\Enums\SharedListRole;
 use App\Enums\UserState;
+use App\Models\Category;
 use App\Models\Reminder;
+use App\Models\ReminderHistory;
+use App\Models\SharedList;
+use App\Models\Tag;
 use App\Models\User;
+use App\Services\CalendarExportService;
+use App\Services\CategoryService;
 use App\Services\NaturalLanguageParserService;
 use App\Services\PremiumPaymentService;
+use App\Services\ReminderHistoryService;
+use App\Services\SharedListService;
+use App\Services\TagService;
 use App\Services\TelegramService;
 use App\Telegram\Presenters\ReminderMessagePresenter;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\Log;
 use InvalidArgumentException;
+use Throwable;
 
 class TelegramBotWorkflow
 {
@@ -46,6 +57,11 @@ class TelegramBotWorkflow
         protected UpdateReminderAction $updateReminderAction,
         protected ReminderMessagePresenter $presenter,
         protected PremiumPaymentService $premiumPayments,
+        protected CategoryService $categories,
+        protected TagService $tags,
+        protected SharedListService $sharedLists,
+        protected CalendarExportService $calendar,
+        protected ReminderHistoryService $history,
     ) {
         $this->telegram = $telegram;
         $this->parser = $parser;
@@ -107,7 +123,9 @@ class TelegramBotWorkflow
         if (str_starts_with($text, '/')) {
             // Команды в группах/супергруппах Telegram могут приходить с суффиксом имени бота,
             // например "/start@ReminderBot" — обрабатываем их так же, как "/start".
-            $command = explode('@', explode(' ', $text)[0])[0];
+            $commandToken = explode(' ', $text, 2)[0];
+            $command = explode('@', $commandToken)[0];
+            $arguments = trim(substr($text, strlen($commandToken)));
             switch ($command) {
                 case '/start':
                     $this->sendStartMessage($user, $chatId);
@@ -116,13 +134,30 @@ class TelegramBotWorkflow
                     $this->sendHelpMessage($user, $chatId);
                     break;
                 case '/list':
-                    $this->sendListMessage($user, $chatId);
+                    $this->sendListMessage($user, $chatId, filter: $arguments !== '' ? $arguments : null);
                     break;
                 case '/premium':
                     $this->sendPremiumMessage($user, $chatId);
                     break;
                 case '/timezone':
                     $this->askTimezone($user, $chatId);
+                    break;
+                case '/categories':
+                case '/category':
+                    $this->handleCategoryCommand($user, $chatId, $arguments);
+                    break;
+                case '/tags':
+                case '/tag':
+                    $this->handleTagCommand($user, $chatId, $arguments);
+                    break;
+                case '/history':
+                    $this->sendHistory($user, $chatId);
+                    break;
+                case '/shared':
+                    $this->handleSharedCommand($user, $chatId, $arguments);
+                    break;
+                case '/calendar':
+                    $this->sendCalendarLink($user, $chatId, $arguments === 'rotate');
                     break;
                 default:
                     $this->telegram->sendMessage([
@@ -238,7 +273,8 @@ class TelegramBotWorkflow
 
             case 'listpage': // Переключение страницы списка (callback_data: listpage_{page})
                 $page = (int) ($parts[1] ?? 1);
-                $this->sendListMessage($user, $chatId, max(1, $page), $messageId);
+                $filter = isset($parts[2], $parts[3]) ? $parts[2].':'.$parts[3] : null;
+                $this->sendListMessage($user, $chatId, max(1, $page), $messageId, $filter);
                 break;
 
             case 'edit': // Кнопка "✏️ Изменить" на элементе списка (callback_data: edit_{id})
@@ -656,6 +692,11 @@ class TelegramBotWorkflow
               ."/list — Показать список активных и выполненных напоминаний\n"
               ."/premium — Подписка Премиум и покупка за Telegram Stars\n"
               ."/timezone — Настройка часового пояса\n\n"
+              ."/categories — Категории Premium\n"
+              ."/tags — Теги Premium\n"
+              ."/history — История изменений за 6 месяцев\n"
+              ."/shared — Совместные списки\n"
+              ."/calendar — Персональная ссылка iCal\n\n"
               ."🤖 <b>Примеры фраз для создания напоминания:</b>\n"
               ."• <i>«Напомни выпить витамины в 21:00»</i>\n"
               ."• <i>«Завтра в 14:30 визит к стоматологу»</i>\n"
@@ -917,12 +958,30 @@ class TelegramBotWorkflow
      *                                   list_active передавать не нужно — там уместно
      *                                   отправить новое сообщение.
      */
-    protected function sendListMessage(User $user, int $chatId, int $page = 1, ?int $editMessageId = null): void
+    protected function sendListMessage(User $user, int $chatId, int $page = 1, ?int $editMessageId = null, ?string $filter = null): void
     {
         $page = max(1, $page);
         $perPage = self::REMINDERS_PER_PAGE;
+        $query = Reminder::query()->where('user_id', $user->id)->where('is_completed', false);
+        $filterCallbackSuffix = '';
 
-        $total = Reminder::where('user_id', $user->id)->where('is_completed', false)->count();
+        if ($filter !== null) {
+            if (! $user->hasPremium() || preg_match('/^(category|tag):(\d+)$/', $filter, $matches) !== 1) {
+                $this->sendText($chatId, 'Фильтры category:ID и tag:ID доступны только в Premium.');
+
+                return;
+            }
+
+            $filterId = (int) $matches[2];
+            if ($matches[1] === 'category') {
+                $query->where('category_id', $filterId)->whereHas('category', fn ($category) => $category->where('user_id', $user->id));
+            } else {
+                $query->whereHas('tags', fn ($tag) => $tag->where('tags.id', $filterId)->where('tags.user_id', $user->id));
+            }
+            $filterCallbackSuffix = '_'.$matches[1].'_'.$filterId;
+        }
+
+        $total = (clone $query)->count();
 
         if ($total === 0) {
             $emptyText = '📭 У вас пока нет активных напоминаний. Просто напишите фразу для создания, например <i>«Купить хлеб в 15:00»</i>.';
@@ -946,8 +1005,7 @@ class TelegramBotWorkflow
         $totalPages = (int) max(1, ceil($total / $perPage));
         $page = min($page, $totalPages);
 
-        $reminders = Reminder::where('user_id', $user->id)
-            ->where('is_completed', false)
+        $reminders = $query
             ->orderBy('target_at', 'asc')
             ->skip(($page - 1) * $perPage)
             ->take($perPage)
@@ -975,10 +1033,10 @@ class TelegramBotWorkflow
         // Кнопки пагинации показываем только когда соответствующее направление доступно.
         $pagerRow = [];
         if ($page > 1) {
-            $pagerRow[] = ['text' => '◀️ Пред.', 'callback_data' => 'listpage_'.($page - 1)];
+            $pagerRow[] = ['text' => '◀️ Пред.', 'callback_data' => 'listpage_'.($page - 1).$filterCallbackSuffix];
         }
         if ($page < $totalPages) {
-            $pagerRow[] = ['text' => '▶️ След.', 'callback_data' => 'listpage_'.($page + 1)];
+            $pagerRow[] = ['text' => '▶️ След.', 'callback_data' => 'listpage_'.($page + 1).$filterCallbackSuffix];
         }
         if ($pagerRow !== []) {
             $keyboard[] = $pagerRow;
@@ -1124,5 +1182,171 @@ class TelegramBotWorkflow
             'chat_id' => $user->telegram_id,
             'text' => 'Возврат Premium обработан. Срок доступа был пересчитан.',
         ]);
+    }
+
+    private function handleCategoryCommand(User $user, int $chatId, string $arguments): void
+    {
+        $this->runPremiumCommand($user, $chatId, function () use ($user, $chatId, $arguments): void {
+            [$action, $rest] = array_pad(explode(' ', $arguments, 2), 2, '');
+            if ($action === 'add') {
+                $category = $this->categories->create($user, $rest);
+                $this->sendText($chatId, 'Категория создана: <b>'.e($category->name)."</b> (#{$category->id}).");
+
+                return;
+            }
+            if ($action === 'delete' && ctype_digit($rest)) {
+                $this->categories->delete($user, Category::query()->findOrFail((int) $rest));
+                $this->sendText($chatId, 'Категория удалена.');
+
+                return;
+            }
+            if ($action === 'set') {
+                [$reminderId, $categoryId] = array_pad(explode(' ', $rest, 2), 2, '');
+                $reminder = $user->reminders()->findOrFail((int) $reminderId);
+                $category = $user->categories()->findOrFail((int) $categoryId);
+                $reminder->update(['category_id' => $category->id]);
+                $this->sendText($chatId, 'Категория назначена напоминанию.');
+
+                return;
+            }
+
+            $items = $this->categories->list($user);
+            $lines = $items->map(fn (Category $category): string => "#{$category->id} — ".e($category->name))->all();
+            $this->sendText($chatId, $lines === []
+                ? 'Категорий пока нет. Создание: <code>/category add Название</code>'
+                : "<b>Категории</b>\n".implode("\n", $lines)."\n\nНазначить: <code>/category set ID_напоминания ID_категории</code>");
+        });
+    }
+
+    private function handleTagCommand(User $user, int $chatId, string $arguments): void
+    {
+        $this->runPremiumCommand($user, $chatId, function () use ($user, $chatId, $arguments): void {
+            [$action, $rest] = array_pad(explode(' ', $arguments, 2), 2, '');
+            if ($action === 'add') {
+                $tag = $this->tags->create($user, $rest);
+                $this->sendText($chatId, 'Тег создан: <b>'.e($tag->name)."</b> (#{$tag->id}).");
+
+                return;
+            }
+            if ($action === 'delete' && ctype_digit($rest)) {
+                $this->tags->delete($user, Tag::query()->findOrFail((int) $rest));
+                $this->sendText($chatId, 'Тег удалён.');
+
+                return;
+            }
+            if ($action === 'set') {
+                [$reminderId, $tagList] = array_pad(explode(' ', $rest, 2), 2, '');
+                $ids = array_values(array_filter(array_map('intval', explode(',', $tagList))));
+                $this->tags->syncReminder($user, $user->reminders()->findOrFail((int) $reminderId), $ids);
+                $this->sendText($chatId, 'Теги назначены напоминанию.');
+
+                return;
+            }
+
+            $items = $this->tags->list($user);
+            $lines = $items->map(fn (Tag $tag): string => "#{$tag->id} — ".e($tag->name))->all();
+            $this->sendText($chatId, $lines === []
+                ? 'Тегов пока нет. Создание: <code>/tag add Название</code>'
+                : "<b>Теги</b>\n".implode("\n", $lines)."\n\nНазначить: <code>/tag set ID_напоминания ID,ID</code>");
+        });
+    }
+
+    private function sendHistory(User $user, int $chatId): void
+    {
+        $this->runPremiumCommand($user, $chatId, function () use ($user, $chatId): void {
+            $history = $this->history->recent($user);
+            $lines = $history->map(fn (ReminderHistory $item): string => sprintf(
+                '%s — %s: %s',
+                $item->created_at->setTimezone($user->timezone)->format('d.m H:i'),
+                e($item->event_type),
+                e($item->text),
+            ))->all();
+            $this->sendText($chatId, $lines === [] ? 'История пока пуста.' : "<b>Последние изменения</b>\n".implode("\n", $lines));
+        });
+    }
+
+    private function handleSharedCommand(User $user, int $chatId, string $arguments): void
+    {
+        $this->runPremiumCommand($user, $chatId, function () use ($user, $chatId, $arguments): void {
+            $parts = preg_split('/\s+/', trim($arguments), 4) ?: [];
+            $action = $parts[0] ?? '';
+            if ($action === 'create' && isset($parts[1])) {
+                $name = trim(substr($arguments, strlen('create')));
+                $list = $this->sharedLists->create($user, $name);
+                $this->sendText($chatId, 'Совместный список создан: <b>'.e($list->name)."</b> (#{$list->id}).");
+
+                return;
+            }
+            if ($action === 'invite' && isset($parts[1], $parts[2], $parts[3])) {
+                $list = SharedList::query()->findOrFail((int) $parts[1]);
+                $invitee = User::query()->where('telegram_id', (int) $parts[2])->firstOrFail();
+                $role = SharedListRole::from($parts[3]);
+                $this->sharedLists->invite($user, $list, $invitee, $role);
+                $this->sendText($chatId, 'Приглашение создано. Пользователь должен принять его командой /shared accept.');
+
+                return;
+            }
+            if ($action === 'accept' && isset($parts[1])) {
+                $this->sharedLists->accept($user, SharedList::query()->findOrFail((int) $parts[1]));
+                $this->sendText($chatId, 'Приглашение принято.');
+
+                return;
+            }
+            if ($action === 'add' && isset($parts[1], $parts[2])) {
+                $this->sharedLists->attachReminder(
+                    $user,
+                    SharedList::query()->findOrFail((int) $parts[1]),
+                    Reminder::query()->findOrFail((int) $parts[2]),
+                );
+                $this->sendText($chatId, 'Напоминание добавлено в совместный список.');
+
+                return;
+            }
+            if ($action === 'chat' && isset($parts[1], $parts[2])) {
+                $this->sharedLists->setTelegramChat(
+                    $user,
+                    SharedList::query()->findOrFail((int) $parts[1]),
+                    (int) $parts[2],
+                );
+                $this->sendText($chatId, 'Групповой чат назначен совместному списку.');
+
+                return;
+            }
+
+            $lists = $this->sharedLists->accessible($user);
+            $lines = $lists->map(fn (SharedList $list): string => "#{$list->id} — ".e($list->name))->all();
+            $this->sendText($chatId, $lines === []
+                ? 'Совместных списков пока нет. Создание: <code>/shared create Название</code>'
+                : "<b>Совместные списки</b>\n".implode("\n", $lines));
+        });
+    }
+
+    private function sendCalendarLink(User $user, int $chatId, bool $rotate): void
+    {
+        $this->runPremiumCommand($user, $chatId, function () use ($user, $chatId, $rotate): void {
+            $token = $this->calendar->token($user, $rotate);
+            $url = route('calendar.feed', ['token' => $token]);
+            $this->sendText($chatId, "Персональная ссылка календаря:\n<code>".e($url)."</code>\n\nДля отзыва старой ссылки: /calendar rotate");
+        });
+    }
+
+    private function runPremiumCommand(User $user, int $chatId, callable $command): void
+    {
+        if (! $user->hasPremium()) {
+            $this->sendText($chatId, 'Эта функция доступна в Premium. Используйте /premium для подключения.');
+
+            return;
+        }
+
+        try {
+            $command();
+        } catch (Throwable) {
+            $this->sendText($chatId, 'Не удалось выполнить команду. Проверьте параметры и права доступа.');
+        }
+    }
+
+    private function sendText(int $chatId, string $text): void
+    {
+        $this->telegram->sendMessage(['chat_id' => $chatId, 'text' => $text]);
     }
 }
