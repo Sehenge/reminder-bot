@@ -85,14 +85,20 @@ class SendReminderNotificationJob implements ShouldQueue
               ."⏰ Время: <b>{$formattedTime}</b>\n\n"
               .'Пожалуйста, выполните или отложите эту задачу.';
 
-        // Готовим inline-кнопки (Выполнено, Отложить, Удалить)
+        // Готовим inline-кнопки (Выполнено, Отложить на 10м/30м/1ч/до завтра, Удалить).
+        // Суффикс "tomorrow" у snooze специально нечисловой (в отличие от 10/30/60) —
+        // обработчик в контроллере распознаёт его до приведения к (int).
         $buttons = [
             [
                 ['text' => '✅ Выполнено', 'callback_data' => "complete_{$reminder->id}"],
-                ['text' => '⏳ Отложить 10м', 'callback_data' => "snooze_{$reminder->id}_10"],
+                ['text' => '⏳ 10м', 'callback_data' => "snooze_{$reminder->id}_10"],
+                ['text' => '⏳ 30м', 'callback_data' => "snooze_{$reminder->id}_30"],
             ],
             [
-                ['text' => '⏳ Отложить 1ч', 'callback_data' => "snooze_{$reminder->id}_60"],
+                ['text' => '⏳ 1ч', 'callback_data' => "snooze_{$reminder->id}_60"],
+                ['text' => '⏳ До завтра', 'callback_data' => "snooze_{$reminder->id}_tomorrow"],
+            ],
+            [
                 ['text' => '❌ Удалить', 'callback_data' => "delete_{$reminder->id}"],
             ],
         ];

@@ -16,6 +16,16 @@ use Illuminate\Support\Facades\Log;
 
 class TelegramWebhookController extends Controller
 {
+    /**
+     * Максимальная длина текста напоминания при редактировании (в символах).
+     */
+    protected const MAX_REMINDER_TEXT_LENGTH = 500;
+
+    /**
+     * Количество напоминаний на одной странице списка /list.
+     */
+    protected const REMINDERS_PER_PAGE = 10;
+
     protected TelegramService $telegram;
 
     protected NaturalLanguageParserService $parser;
@@ -263,39 +273,20 @@ class TelegramWebhookController extends Controller
         $action = $parts[0];
 
         switch ($action) {
-            case 'complete': // Отметить выполненным
+            case 'complete': // Отметить выполненным / подтвердить текущее срабатывание повторяющегося
                 $reminderId = $parts[1] ?? null;
                 $reminder = Reminder::where('id', $reminderId)->where('user_id', $user->id)->first();
                 if ($reminder) {
-                    $reminder->update([
-                        'is_completed' => true,
-                        'completed_at' => Carbon::now(),
-                    ]);
-                    $this->telegram->editMessageText([
-                        'chat_id' => $chatId,
-                        'message_id' => $messageId,
-                        'text' => '✅ Напоминание выполнено: <s>'.e($reminder->text).'</s>',
-                    ]);
+                    $this->completeReminder($reminder, $user, $chatId, $messageId);
                 }
                 break;
 
-            case 'snooze': // Отложить
+            case 'snooze': // Отложить на 10/30/60 минут или "до завтра"
                 $reminderId = $parts[1] ?? null;
-                $minutes = (int) ($parts[2] ?? 10);
+                $unit = $parts[2] ?? '10';
                 $reminder = Reminder::where('id', $reminderId)->where('user_id', $user->id)->first();
                 if ($reminder) {
-                    $newTime = Carbon::now()->addMinutes($minutes);
-                    $reminder->update([
-                        'target_at' => $newTime,
-                        'is_completed' => false,
-                    ]);
-
-                    $timeFormatted = $newTime->setTimezone($user->timezone)->format('H:i');
-                    $this->telegram->editMessageText([
-                        'chat_id' => $chatId,
-                        'message_id' => $messageId,
-                        'text' => '⏳ Напоминание <b>'.e($reminder->text)."</b> отложено на {$minutes} мин (до {$timeFormatted}).",
-                    ]);
+                    $this->snoozeReminder($reminder, $user, $chatId, $messageId, $unit);
                 }
                 break;
 
@@ -339,6 +330,37 @@ class TelegramWebhookController extends Controller
                 }
                 break;
 
+            case 'listpage': // Переключение страницы списка (callback_data: listpage_{page})
+                $page = (int) ($parts[1] ?? 1);
+                $this->sendListMessage($user, $chatId, max(1, $page), $messageId);
+                break;
+
+            case 'edit': // Кнопка "✏️ Изменить" на элементе списка (callback_data: edit_{id})
+                $reminderId = $parts[1] ?? null;
+                $reminder = Reminder::where('id', $reminderId)->where('user_id', $user->id)->first();
+                if ($reminder) {
+                    $this->showEditMenu($reminder, $chatId, $messageId);
+                }
+                break;
+
+            case 'editfield': // Выбор редактируемого поля (callback_data: editfield_{id}_text|time|recurrence)
+                $reminderId = $parts[1] ?? null;
+                $field = $parts[2] ?? null;
+                $reminder = Reminder::where('id', $reminderId)->where('user_id', $user->id)->first();
+                if ($reminder && in_array($field, ['text', 'time', 'recurrence'], true)) {
+                    $this->startEditField($user, $reminder, $chatId, $messageId, $field);
+                }
+                break;
+
+            case 'editrecurrence': // Выбор нового типа повторения (callback_data: editrecurrence_{id}_{type})
+                $reminderId = $parts[1] ?? null;
+                $type = $parts[2] ?? null;
+                $reminder = Reminder::where('id', $reminderId)->where('user_id', $user->id)->first();
+                if ($reminder && in_array($type, ['once', 'daily', 'weekly', 'monthly', 'workdays'], true)) {
+                    $this->applyRecurrenceEdit($reminder, $user, $chatId, $messageId, $type);
+                }
+                break;
+
             case 'timezone': // Кнопка "Изменить часовой пояс" (callback_data: timezone_ask)
                 if (($parts[1] ?? null) === 'ask') {
                     $this->askTimezone($user, $chatId);
@@ -359,6 +381,344 @@ class TelegramWebhookController extends Controller
                 ]);
                 break;
         }
+    }
+
+    /**
+     * Отметить напоминание "Выполненным" по кнопке.
+     *
+     * Для одноразового напоминания это окончательное завершение (как и раньше).
+     * Для повторяющегося — ручное нажатие "Выполнено" ДО автоматической отправки должно
+     * вести себя так же, как штатная отправка в SendReminderNotificationJob: подтверждать
+     * только текущее срабатывание и переводить напоминание на следующий срок, а не тихо
+     * убивать все будущие повторения. Если calculateNextOccurrence() не смог посчитать
+     * следующий срок (повторение исчерпано или некорректно настроено), откатываемся
+     * к окончательному завершению — как для once.
+     */
+    protected function completeReminder(Reminder $reminder, User $user, int $chatId, int $messageId): void
+    {
+        if ($reminder->recurrence_type !== 'once') {
+            $nextOccurrence = $reminder->calculateNextOccurrence($user->timezone);
+
+            if ($nextOccurrence) {
+                $reminder->update([
+                    'target_at' => $nextOccurrence,
+                    'is_completed' => false,
+                    'status' => Reminder::STATUS_PENDING,
+                ]);
+
+                $localTime = $nextOccurrence->copy()->setTimezone($user->timezone);
+                $this->telegram->editMessageText([
+                    'chat_id' => $chatId,
+                    'message_id' => $messageId,
+                    'text' => '✅ Текущее срабатывание подтверждено: <b>'.e($reminder->text).'</b>.'
+                             .' Следующее напоминание: <b>'.$localTime->format('d.m.Y H:i').'</b>.',
+                ]);
+
+                return;
+            }
+        }
+
+        $reminder->update([
+            'is_completed' => true,
+            'completed_at' => Carbon::now(),
+        ]);
+
+        $this->telegram->editMessageText([
+            'chat_id' => $chatId,
+            'message_id' => $messageId,
+            'text' => '✅ Напоминание выполнено: <s>'.e($reminder->text).'</s>',
+        ]);
+    }
+
+    /**
+     * Отложить напоминание на 10/30/60 минут или "до завтра" по кнопке.
+     *
+     * "До завтра" считается в часовом поясе пользователя (то же местное время суток,
+     * на календарный день позже) той же техникой, что и Reminder::calculateNextOccurrence():
+     * арифметика ведётся в именованном часовом поясе, чтобы Carbon корректно учёл
+     * переход на летнее/зимнее время, а не наивно прибавлял 24 часа в UTC.
+     *
+     * Статус всегда возвращается в 'pending' независимо от того, каким он был
+     * (pending/dispatching/sent/failed): пользователь явно попросил напомнить снова
+     * в новое — заведомо будущее — время, а DispatchRemindersCommand выбирает на
+     * отправку только status='pending', так что без этого сброса отложенное
+     * напоминание, уже прошедшее через пайплайн отправки один раз, никогда
+     * больше не сработает.
+     */
+    protected function snoozeReminder(Reminder $reminder, User $user, int $chatId, int $messageId, string $unit): void
+    {
+        if ($unit === 'tomorrow') {
+            $newTime = Carbon::now($user->timezone)->addDay()->setTimezone('UTC');
+            $label = 'до завтра';
+        } else {
+            $minutes = (int) $unit;
+            $newTime = Carbon::now()->addMinutes($minutes);
+            $label = "на {$minutes} мин";
+        }
+
+        $reminder->update([
+            'target_at' => $newTime,
+            'is_completed' => false,
+            'status' => Reminder::STATUS_PENDING,
+        ]);
+
+        $timeFormatted = $newTime->copy()->setTimezone($user->timezone)->format('d.m.Y H:i');
+        $this->telegram->editMessageText([
+            'chat_id' => $chatId,
+            'message_id' => $messageId,
+            'text' => '⏳ Напоминание <b>'.e($reminder->text)."</b> отложено {$label} (до {$timeFormatted}).",
+        ]);
+    }
+
+    /**
+     * Показать меню выбора редактируемого поля напоминания (текст/время/повторение).
+     */
+    protected function showEditMenu(Reminder $reminder, int $chatId, int $messageId): void
+    {
+        $this->telegram->editMessageText([
+            'chat_id' => $chatId,
+            'message_id' => $messageId,
+            'text' => '✏️ Что изменить в напоминании «'.e($reminder->text).'»?',
+            'reply_markup' => json_encode([
+                'inline_keyboard' => [
+                    [
+                        ['text' => '📝 Текст', 'callback_data' => "editfield_{$reminder->id}_text"],
+                        ['text' => '⏰ Время', 'callback_data' => "editfield_{$reminder->id}_time"],
+                    ],
+                    [
+                        ['text' => '🔄 Повторение', 'callback_data' => "editfield_{$reminder->id}_recurrence"],
+                    ],
+                    [
+                        ['text' => '🚫 Отмена', 'callback_data' => 'cancel'],
+                    ],
+                ],
+            ]),
+        ]);
+    }
+
+    /**
+     * Начать редактирование конкретного поля: для текста/времени переводит пользователя
+     * в соответствующее FSM-состояние (следующее текстовое сообщение будет интерпретировано
+     * как новое значение), для повторения — сразу показывает кнопки с фиксированными типами.
+     */
+    protected function startEditField(User $user, Reminder $reminder, int $chatId, int $messageId, string $field): void
+    {
+        if ($field === 'recurrence') {
+            $this->telegram->editMessageText([
+                'chat_id' => $chatId,
+                'message_id' => $messageId,
+                'text' => '🔄 Выберите новую периодичность повторения:',
+                'reply_markup' => json_encode([
+                    'inline_keyboard' => [
+                        [
+                            ['text' => 'Одноразово', 'callback_data' => "editrecurrence_{$reminder->id}_once"],
+                            ['text' => 'Каждый день', 'callback_data' => "editrecurrence_{$reminder->id}_daily"],
+                        ],
+                        [
+                            ['text' => 'Каждую неделю', 'callback_data' => "editrecurrence_{$reminder->id}_weekly"],
+                            ['text' => 'Каждый месяц', 'callback_data' => "editrecurrence_{$reminder->id}_monthly"],
+                        ],
+                        [
+                            ['text' => 'По будням', 'callback_data' => "editrecurrence_{$reminder->id}_workdays"],
+                        ],
+                        [
+                            ['text' => '🚫 Отмена', 'callback_data' => 'cancel'],
+                        ],
+                    ],
+                ]),
+            ]);
+
+            return;
+        }
+
+        $prompts = [
+            'text' => '📝 Отправьте новый текст напоминания одним сообщением.',
+            'time' => '⏰ Отправьте новое время/дату напоминания текстом, например: «завтра в 18:00» или «через 2 часа».',
+        ];
+
+        // Запоминаем, какое напоминание и какое поле редактируем — следующее обычное
+        // текстовое сообщение пользователя обработает handleUserState() (state = edit_text/edit_time).
+        $user->update([
+            'state' => "edit_{$field}",
+            'state_data' => ['reminder_id' => $reminder->id],
+        ]);
+
+        $this->telegram->editMessageText([
+            'chat_id' => $chatId,
+            'message_id' => $messageId,
+            'text' => $prompts[$field],
+        ]);
+    }
+
+    /**
+     * Применить новый текст напоминания (FSM state = edit_text).
+     */
+    protected function handleEditTextState(User $user, string $text, int $chatId): void
+    {
+        $reminder = $this->findReminderBeingEdited($user);
+
+        if (! $reminder) {
+            $this->clearState($user);
+            $this->telegram->sendMessage([
+                'chat_id' => $chatId,
+                'text' => '❌ Напоминание не найдено (возможно, уже удалено). Редактирование отменено.',
+            ]);
+
+            return;
+        }
+
+        $newText = trim($text);
+
+        if ($newText === '' || mb_strlen($newText) > self::MAX_REMINDER_TEXT_LENGTH) {
+            $this->telegram->sendMessage([
+                'chat_id' => $chatId,
+                'text' => '❌ Текст напоминания должен быть от 1 до '.self::MAX_REMINDER_TEXT_LENGTH.' символов. Отправьте текст ещё раз.',
+            ]);
+
+            // Остаёмся в состоянии edit_text, чтобы пользователь мог повторить попытку.
+            return;
+        }
+
+        $reminder->text = $newText;
+        $this->reactivateIfFuture($reminder);
+        $reminder->save();
+        $this->clearState($user);
+
+        $this->telegram->sendMessage([
+            'chat_id' => $chatId,
+            'text' => '✅ Текст напоминания обновлён: <b>'.e($reminder->text).'</b>.',
+        ]);
+    }
+
+    /**
+     * Применить новое время напоминания (FSM state = edit_time).
+     *
+     * Реиспользует NaturalLanguageParserService и уважает контракт needsClarification —
+     * так же, как parseAndConfirmReminder(): если время не удалось уверенно распознать,
+     * НЕ сохраняем бессмысленное значение, а просим пользователя переформулировать
+     * и остаёмся в том же состоянии.
+     *
+     * Тип и значение повторения (recurrence_type/recurrence_value) намеренно не трогаем —
+     * при редактировании времени повторяющегося напоминания смещается только точка
+     * отсчёта (target_at), а периодичность остаётся прежней; для смены периодичности
+     * есть отдельное редактирование "Повторение".
+     */
+    protected function handleEditTimeState(User $user, string $text, int $chatId): void
+    {
+        $reminder = $this->findReminderBeingEdited($user);
+
+        if (! $reminder) {
+            $this->clearState($user);
+            $this->telegram->sendMessage([
+                'chat_id' => $chatId,
+                'text' => '❌ Напоминание не найдено (возможно, уже удалено). Редактирование отменено.',
+            ]);
+
+            return;
+        }
+
+        $dto = $this->parser->parse($text, $user->timezone);
+
+        if ($dto->needsClarification) {
+            $this->telegram->sendMessage([
+                'chat_id' => $chatId,
+                'text' => "🤔 Не удалось точно определить дату и время.\n\n"
+                         .'Попробуйте переформулировать, например: <b>«завтра в 15:00»</b> или <b>«через 2 часа»</b>.',
+            ]);
+
+            // Остаёмся в состоянии edit_time, чтобы пользователь мог повторить попытку.
+            return;
+        }
+
+        $reminder->target_at = $dto->targetAt;
+        $this->reactivateIfFuture($reminder);
+        $reminder->save();
+        $this->clearState($user);
+
+        $localTime = $dto->targetAt->copy()->setTimezone($user->timezone);
+        $this->telegram->sendMessage([
+            'chat_id' => $chatId,
+            'text' => '✅ Время напоминания обновлено: <b>'.$localTime->format('d.m.Y H:i')."</b> (часовой пояс: {$user->timezone}).",
+        ]);
+    }
+
+    /**
+     * Применить новый тип повторения (callback editrecurrence_{id}_{type}).
+     *
+     * При переключении на "еженедельно" сохраняем день недели из текущего target_at
+     * (в часовом поясе пользователя), чтобы recurrence_value был согласован с форматом,
+     * который использует NaturalLanguageParserService/Reminder::calculateNextOccurrence()
+     * (ISO-номер дня недели). Для остальных типов recurrence_value не используется.
+     */
+    protected function applyRecurrenceEdit(Reminder $reminder, User $user, int $chatId, int $messageId, string $type): void
+    {
+        $recurrenceValue = null;
+        if ($type === 'weekly') {
+            $localTarget = $reminder->target_at->copy()->setTimezone($user->timezone);
+            $recurrenceValue = (string) $localTarget->dayOfWeekIso;
+        }
+
+        $reminder->recurrence_type = $type;
+        $reminder->recurrence_value = $recurrenceValue;
+        $this->reactivateIfFuture($reminder);
+        $reminder->save();
+
+        $this->clearState($user);
+
+        $this->telegram->editMessageText([
+            'chat_id' => $chatId,
+            'message_id' => $messageId,
+            'text' => '✅ Повторение обновлено: <b>'.$this->recurrenceLabel($type).'</b>.',
+        ]);
+    }
+
+    /**
+     * Найти напоминание, которое сейчас редактируется (по reminder_id в state_data),
+     * ограниченное текущим пользователем — чтобы нельзя было отредактировать чужое
+     * напоминание, подделав/переиспользовав state_data.
+     */
+    protected function findReminderBeingEdited(User $user): ?Reminder
+    {
+        $reminderId = $user->state_data['reminder_id'] ?? null;
+
+        if (! $reminderId) {
+            return null;
+        }
+
+        return Reminder::where('id', $reminderId)->where('user_id', $user->id)->first();
+    }
+
+    /**
+     * Если у напоминания появилось новое будущее target_at, а его статус остался
+     * от предыдущего прохода через пайплайн отправки ('sent' или 'failed'), возвращаем
+     * его в дispatchable-состояние — иначе DispatchRemindersCommand (который выбирает
+     * на отправку только is_completed=false и status='pending') никогда больше его не
+     * подхватит после успешного редактирования. Статус 'sent' обычно сопутствует
+     * is_completed=true (одноразовое напоминание завершено или повторение исчерпано),
+     * поэтому одного сброса статуса недостаточно — сбрасываем и is_completed.
+     */
+    protected function reactivateIfFuture(Reminder $reminder): void
+    {
+        if (in_array($reminder->status, [Reminder::STATUS_SENT, Reminder::STATUS_FAILED], true)
+            && $reminder->target_at->isFuture()) {
+            $reminder->status = Reminder::STATUS_PENDING;
+            $reminder->is_completed = false;
+        }
+    }
+
+    /**
+     * Человекочитаемая метка типа повторения для сообщений пользователю.
+     */
+    protected function recurrenceLabel(string $type): string
+    {
+        return match ($type) {
+            'once' => 'Одноразово',
+            'daily' => 'Каждый день',
+            'weekly' => 'Каждую неделю',
+            'monthly' => 'Каждый месяц',
+            'workdays' => 'По будням',
+            default => 'Повторяющееся',
+        };
     }
 
     /**
@@ -538,6 +898,18 @@ class TelegramWebhookController extends Controller
             return;
         }
 
+        if ($user->state === 'edit_text') {
+            $this->handleEditTextState($user, $text, $chatId);
+
+            return;
+        }
+
+        if ($user->state === 'edit_time') {
+            $this->handleEditTimeState($user, $text, $chatId);
+
+            return;
+        }
+
         // Неизвестное/устаревшее значение state (не должно происходить в норме, но если
         // БД содержит значение, которое мы больше не обрабатываем, — не оставляем
         // пользователя "залипшим" в нём навсегда, а сбрасываем FSM и просим начать заново.
@@ -586,14 +958,7 @@ class TelegramWebhookController extends Controller
         // Переводим время в часовой пояс пользователя для корректного отображения в боте
         $localTargetTime = $dto->targetAt->copy()->setTimezone($user->timezone);
 
-        $recurrenceLabels = [
-            'once' => 'Одноразово',
-            'daily' => 'Каждый день',
-            'weekly' => 'Каждую неделю',
-            'monthly' => 'Каждый месяц',
-            'workdays' => 'По будням',
-        ];
-        $recLabel = $recurrenceLabels[$dto->recurrenceType] ?? 'Повторяющееся';
+        $recLabel = $this->recurrenceLabel($dto->recurrenceType);
 
         $confirmText = "📝 <b>Создать новое напоминание?</b>\n\n"
                      .'📋 Текст: <b>'.e($dto->text)."</b>\n"
@@ -661,14 +1026,7 @@ class TelegramWebhookController extends Controller
         $this->clearState($user);
 
         $localTime = Carbon::parse($reminder->target_at)->setTimezone($user->timezone);
-        $recurrenceLabels = [
-            'once' => 'Одноразово',
-            'daily' => 'Каждый день',
-            'weekly' => 'Каждую неделю',
-            'monthly' => 'Каждый месяц',
-            'workdays' => 'По будням',
-        ];
-        $recLabel = $recurrenceLabels[$reminder->recurrence_type] ?? 'Одноразово';
+        $recLabel = $this->recurrenceLabel($reminder->recurrence_type);
 
         $responseText = "🔔 <b>Напоминание успешно создано!</b>\n\n"
                       .'📌 Текст: <b>'.e($reminder->text)."</b>\n"
@@ -691,48 +1049,95 @@ class TelegramWebhookController extends Controller
     }
 
     /**
-     * Показать список напоминаний (/list)
+     * Показать список активных напоминаний (/list, кнопка "Мои напоминания" или переключение
+     * страницы кнопками "◀️ Пред."/"▶️ След.").
+     *
+     * @param  int  $page  Номер страницы, отсчёт с 1 (значения вне диапазона зажимаются).
+     * @param  int|null  $editMessageId  Если передан — редактируем существующее сообщение
+     *                                   вместо отправки нового. Используется при пагинации
+     *                                   по кнопкам, чтобы чат не засорялся дублирующимися
+     *                                   списками. Для исходного вызова из /list или
+     *                                   list_active передавать не нужно — там уместно
+     *                                   отправить новое сообщение.
      */
-    protected function sendListMessage(User $user, int $chatId): void
+    protected function sendListMessage(User $user, int $chatId, int $page = 1, ?int $editMessageId = null): void
     {
-        $reminders = Reminder::where('user_id', $user->id)
-            ->where('is_completed', false)
-            ->orderBy('target_at', 'asc')
-            ->limit(15)
-            ->get();
+        $page = max(1, $page);
+        $perPage = self::REMINDERS_PER_PAGE;
 
-        if ($reminders->isEmpty()) {
-            $this->telegram->sendMessage([
-                'chat_id' => $chatId,
-                'text' => '📭 У вас пока нет активных напоминаний. Просто напишите фразу для создания, например <i>«Купить хлеб в 15:00»</i>.',
-            ]);
+        $total = Reminder::where('user_id', $user->id)->where('is_completed', false)->count();
+
+        if ($total === 0) {
+            $emptyText = '📭 У вас пока нет активных напоминаний. Просто напишите фразу для создания, например <i>«Купить хлеб в 15:00»</i>.';
+
+            if ($editMessageId) {
+                $this->telegram->editMessageText([
+                    'chat_id' => $chatId,
+                    'message_id' => $editMessageId,
+                    'text' => $emptyText,
+                ]);
+            } else {
+                $this->telegram->sendMessage([
+                    'chat_id' => $chatId,
+                    'text' => $emptyText,
+                ]);
+            }
 
             return;
         }
 
-        $text = "📋 <b>Ваши активные напоминания (топ 15):</b>\n\n";
+        $totalPages = (int) max(1, ceil($total / $perPage));
+        $page = min($page, $totalPages);
+
+        $reminders = Reminder::where('user_id', $user->id)
+            ->where('is_completed', false)
+            ->orderBy('target_at', 'asc')
+            ->skip(($page - 1) * $perPage)
+            ->take($perPage)
+            ->get();
+
+        $text = "📋 <b>Ваши активные напоминания (стр. {$page}/{$totalPages}):</b>\n\n";
         $keyboard = [];
 
         foreach ($reminders as $index => $reminder) {
-            $num = $index + 1;
+            $num = ($page - 1) * $perPage + $index + 1;
             $localTime = $reminder->target_at->copy()->setTimezone($user->timezone);
             $formattedTime = $localTime->format('d.m.Y H:i');
             $typeIcon = $reminder->recurrence_type !== 'once' ? '🔄' : '📌';
 
             $text .= "{$num}. {$typeIcon} <b>".e($reminder->text)."</b> — <i>{$formattedTime}</i>\n";
 
-            // Кнопки удаления для каждого элемента в списке
+            // Кнопки действий для каждого элемента в списке
             $keyboard[] = [
                 ['text' => "❌ {$num}", 'callback_data' => "delete_{$reminder->id}"],
                 ['text' => "✅ {$num}", 'callback_data' => "complete_{$reminder->id}"],
+                ['text' => "✏️ {$num}", 'callback_data' => "edit_{$reminder->id}"],
             ];
         }
 
-        $this->telegram->sendMessage([
+        // Кнопки пагинации показываем только когда соответствующее направление доступно.
+        $pagerRow = [];
+        if ($page > 1) {
+            $pagerRow[] = ['text' => '◀️ Пред.', 'callback_data' => 'listpage_'.($page - 1)];
+        }
+        if ($page < $totalPages) {
+            $pagerRow[] = ['text' => '▶️ След.', 'callback_data' => 'listpage_'.($page + 1)];
+        }
+        if ($pagerRow !== []) {
+            $keyboard[] = $pagerRow;
+        }
+
+        $payload = [
             'chat_id' => $chatId,
             'text' => $text,
             'reply_markup' => json_encode(['inline_keyboard' => $keyboard]),
-        ]);
+        ];
+
+        if ($editMessageId) {
+            $this->telegram->editMessageText(array_merge($payload, ['message_id' => $editMessageId]));
+        } else {
+            $this->telegram->sendMessage($payload);
+        }
     }
 
     /**
