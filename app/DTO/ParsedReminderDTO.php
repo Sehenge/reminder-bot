@@ -27,5 +27,8 @@ class ParsedReminderDTO
         public ?string $recurrenceValue = null,
         public bool $success = false,
         public bool $needsClarification = false,
+        public float $confidence = 0.0,
+        public ?string $failureReason = null,
+        public string $locale = 'ru',
     ) {}
 }

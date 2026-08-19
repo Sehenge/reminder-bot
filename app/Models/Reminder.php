@@ -111,7 +111,10 @@ class Reminder extends Model
                     $next->addWeek();
                     break;
                 case 'monthly':
-                    $next->addMonth();
+                    $next->addMonthNoOverflow();
+                    if ($this->recurrence_value !== null) {
+                        $next->day(min((int) $this->recurrence_value, $next->daysInMonth));
+                    }
                     break;
                 case 'workdays':
                     do {
@@ -128,6 +131,16 @@ class Reminder extends Model
                     } else {
                         $next->addDay();
                     }
+                    break;
+                case 'interval':
+                    [$unit, $amount] = array_pad(explode(':', (string) $this->recurrence_value, 2), 2, '1');
+                    $amount = max(1, (int) $amount);
+                    match ($unit) {
+                        'minutes' => $next->addMinutes($amount),
+                        'hours' => $next->addHours($amount),
+                        'weeks' => $next->addWeeks($amount),
+                        default => $next->addDays($amount),
+                    };
                     break;
                 default:
                     return null;

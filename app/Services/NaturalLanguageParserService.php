@@ -2,229 +2,286 @@
 
 namespace App\Services;
 
+use App\Contracts\ReminderParserFallback;
 use App\DTO\ParsedReminderDTO;
 use Carbon\Carbon;
 
-class NaturalLanguageParserService
+final class NaturalLanguageParserService
 {
-    /**
-     * Парсинг строки естественного языка на русском языке
-     * Примеры:
-     * - "Напомни купить молоко завтра в 15:00"
-     * - "Каждый понедельник в 9:00 созвон с командой"
-     * - "Каждый день в 22:30 выпить витамины"
-     * - "Через 15 минут проверить духовку"
-     * - "30 мая в 12:00 сдать проект"
-     *
-     * Контракт результата: если ни дата, ни время, ни периодичность не были распознаны,
-     * метод НЕ подставляет случайное время (например, "+1 час"). Вместо этого возвращается
-     * ParsedReminderDTO с success=false и needsClarification=true, а поле targetAt содержит
-     * лишь текущий момент времени и не должно интерпретироваться как реальный результат
-     * разбора — вызывающий код обязан переспросить пользователя.
-     */
-    public function parse(string $text, string $timezone = 'UTC'): ParsedReminderDTO
-    {
-        // Очищаем от триггерного слова "Напомни" в начале строки (регистронезависимо)
-        $text = preg_replace('/^(напомни|напомнить|remind)\s+/ui', '', trim($text));
+    private const WEEKDAYS = [
+        'ru' => ['понедельник' => 1, 'понедельникам' => 1, 'вторник' => 2, 'вторникам' => 2, 'среду' => 3, 'средам' => 3, 'четверг' => 4, 'четвергам' => 4, 'пятницу' => 5, 'пятницам' => 5, 'субботу' => 6, 'субботам' => 6, 'воскресенье' => 7, 'воскресеньям' => 7],
+        'en' => ['monday' => 1, 'mondays' => 1, 'tuesday' => 2, 'tuesdays' => 2, 'wednesday' => 3, 'wednesdays' => 3, 'thursday' => 4, 'thursdays' => 4, 'friday' => 5, 'fridays' => 5, 'saturday' => 6, 'saturdays' => 6, 'sunday' => 7, 'sundays' => 7],
+    ];
 
+    private const MONTHS = [
+        'января' => 1, 'февраля' => 2, 'марта' => 3, 'апреля' => 4, 'мая' => 5, 'июня' => 6,
+        'июля' => 7, 'августа' => 8, 'сентября' => 9, 'октября' => 10, 'ноября' => 11, 'декабря' => 12,
+        'january' => 1, 'february' => 2, 'march' => 3, 'april' => 4, 'may' => 5, 'june' => 6,
+        'july' => 7, 'august' => 8, 'september' => 9, 'october' => 10, 'november' => 11, 'december' => 12,
+    ];
+
+    public function __construct(private readonly ?ReminderParserFallback $fallback = null) {}
+
+    public function parse(string $input, string $timezone = 'UTC', string $language = 'ru'): ParsedReminderDTO
+    {
+        $locale = str_starts_with(mb_strtolower($language), 'en') ? 'en' : 'ru';
+        $text = trim((string) preg_replace('/^(напомни(?:ть)?|remind\s+me(?:\s+to)?|remind)\s+/ui', '', trim($input)));
         $now = Carbon::now($timezone);
-        $targetAt = $now->copy();
+        $target = $now->copy();
         $recurrenceType = 'once';
         $recurrenceValue = null;
-        $success = false;
-        $needsClarification = false;
-
-        // 1. Определение периодичности (каждый день / каждый понедельник)
-        $isRecurring = false;
-
-        // "каждый день" / "ежедневно"
-        if (preg_match('/(каждый день|ежедневно|каждые сутки)/ui', $text)) {
-            $recurrenceType = 'daily';
-            $isRecurring = true;
-            $text = preg_replace('/(каждый день|ежедневно|каждые сутки)/ui', '', $text);
-        }
-        // "по будням" / "каждый будний день"
-        elseif (preg_match('/(по будням|в будни|каждый будний день)/ui', $text)) {
-            $recurrenceType = 'workdays';
-            $isRecurring = true;
-            $text = preg_replace('/(по будням|в будни|каждый будний день)/ui', '', $text);
-        }
-        // "каждый(ую) [день недели]"
-        elseif (preg_match('/каждый\s+(понедельник|вторник|среду|четверг|пятницу|субботу|воскресенье)/ui', $text, $matches)) {
-            $recurrenceType = 'weekly';
-            $isRecurring = true;
-            $dayName = mb_strtolower($matches[1]);
-            $dayOfWeekMap = [
-                'понедельник' => 1,
-                'вторник' => 2,
-                'среду' => 3,
-                'четверг' => 4,
-                'пятницу' => 5,
-                'субботу' => 6,
-                'воскресенье' => 7,
-            ];
-            $dayIso = $dayOfWeekMap[$dayName] ?? 1;
-            $recurrenceValue = (string) $dayIso;
-
-            // Сдвигаем targetAt на ближайший указанный день недели
-            if ($targetAt->dayOfWeekIso !== $dayIso) {
-                $targetAt->next($dayIso);
-            }
-            $text = preg_replace('/каждый\s+(понедельник|вторник|среду|четверг|пятницу|субботу|воскресенье)/ui', '', $text);
-        }
-        // "каждый месяц"
-        elseif (preg_match('/(каждый месяц|ежемесячно)/ui', $text)) {
-            $recurrenceType = 'monthly';
-            $isRecurring = true;
-            $text = preg_replace('/(каждый месяц|ежемесячно)/ui', '', $text);
-        }
-
-        // 2. Поиск относительных дат ("завтра", "послезавтра", "сегодня", "через X минут/часов/дней")
-        // ВАЖНО: этот блок обязан выполняться РАНЬШЕ поиска времени вида "ЧЧ:ММ" (см. ниже).
-        // У формата даты "ДД.ММ.ГГГГ" (например, "21.06.2026") первые два числа "21.06"
-        // синтаксически неотличимы от времени "21:06" для регулярки времени с разделителями
-        // "[:.-]" — если сначала искать время, "21.06" в "21.06.2026 в 10:00 ..." ошибочно
-        // распознавался бы как время 21:06, а сама дата терялась. Извлекая дату первой и
-        // вырезая её из текста, мы убираем этот конфликт.
         $dateFound = false;
-        // "через X ..." задаёт итоговый момент времени явным сложением, а не подстановкой
-        // часов/минут через setTime() — эту особенность нужно учитывать ниже при выставлении времени.
-        $isRelative = false;
-
-        if (preg_match('/через\s+(\d+)\s*(минут|минуту|минуты|мин|ч|час|часа|часов|дн|дня|дней|день)/ui', $text, $matches)) {
-            $value = (int) $matches[1];
-            $unit = mb_strtolower($matches[2]);
-
-            if (str_contains($unit, 'мин')) {
-                $targetAt->addMinutes($value);
-            } elseif (str_contains($unit, 'час') || $unit === 'ч') {
-                $targetAt->addHours($value);
-            } elseif (str_contains($unit, 'дне') || str_contains($unit, 'дня') || str_contains($unit, 'ден') || $unit === 'дн') {
-                $targetAt->addDays($value);
-            }
-            $dateFound = true;
-            $timeFound = true; // При относительном времени типа "через 15 мин" точное время суток уже определено добавлением
-            $isRelative = true;
-            $text = preg_replace('/через\s+\d+\s*(минут|минуту|минуты|мин|ч|час|часа|часов|дн|дня|дней|день)/ui', '', $text);
-        }
-        // ВАЖНО: "послезавтра" нужно проверять раньше "завтра", т.к. слово "завтра" является
-        // подстрокой слова "послезавтра" — при обратном порядке ветка "завтра" ошибочно
-        // срабатывала бы первой на тексте "послезавтра" (регулярка находила подстроку),
-        // из-за чего "послезавтра" превращалось в "+1 день" вместо "+2 дня", а в очищенном
-        // тексте оставался мусорный обрубок "после".
-        elseif (preg_match('/послезавтра/ui', $text)) {
-            $targetAt->addDays(2);
-            $dateFound = true;
-            $text = preg_replace('/послезавтра/ui', '', $text);
-        } elseif (preg_match('/завтра/ui', $text)) {
-            $targetAt->addDay();
-            $dateFound = true;
-            $text = preg_replace('/завтра/ui', '', $text);
-        } elseif (preg_match('/сегодня/ui', $text)) {
-            $dateFound = true;
-            $text = preg_replace('/сегодня/ui', '', $text);
-        }
-        // Конкретная дата: "30 мая", "15 декабря в 12:00", "21.05.2026"
-        elseif (preg_match('/(\d{1,2})[\s.](января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря|\d{2})(?:[\s.](\d{4}))?/ui', $text, $matches)) {
-            $day = (int) $matches[1];
-            $monthStr = mb_strtolower($matches[2]);
-            $year = isset($matches[3]) ? (int) $matches[3] : $now->year;
-
-            $monthsMap = [
-                'января' => 1, 'январь' => 1, '01' => 1,
-                'февраля' => 2, 'февраль' => 2, '02' => 2,
-                'марта' => 3, 'март' => 3, '03' => 3,
-                'апреля' => 4, 'апрель' => 4, '04' => 4,
-                'мая' => 5, 'май' => 5, '05' => 5,
-                'июня' => 6, 'июнь' => 6, '06' => 6,
-                'июля' => 7, 'июль' => 7, '07' => 7,
-                'августа' => 8, 'август' => 8, '08' => 8,
-                'сентября' => 9, 'сентябрь' => 9, '09' => 9,
-                'октября' => 10, 'октябрь' => 10, '10' => 10,
-                'ноября' => 11, 'ноябрь' => 11, '11' => 11,
-                'декабря' => 12, 'декабрь' => 12, '12' => 12,
-            ];
-
-            $month = $monthsMap[$monthStr] ?? (int) $monthStr;
-            if ($month >= 1 && $month <= 12) {
-                // Если указанная дата в этом году уже прошла (без года в запросе), ставим на следующий год
-                if (! isset($matches[3]) && Carbon::create($year, $month, $day, 23, 59, 59, $timezone)->isBefore($now)) {
-                    $year++;
-                }
-                $targetAt->setDate($year, $month, $day);
-                $dateFound = true;
-            }
-            $text = preg_replace('/(\d{1,2})[\s.](января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря|\d{2})(?:[\s.](\d{4}))?/ui', '', $text);
-        }
-
-        // 3. Поиск времени вида "15:30", "9:00", "в 18:45", "в 14" (после того, как дата уже
-        // извлечена и вырезана из текста — см. комментарий выше).
         $timeFound = false;
-        $hour = 9; // По умолчанию утро
-        $minute = 0;
+        $relative = false;
 
-        if (preg_match('/(?:в|в\s+)?(\d{1,2})[:.-](\d{2})/ui', $text, $matches)) {
-            $hour = (int) $matches[1];
-            $minute = (int) $matches[2];
-            $timeFound = true;
-            $text = preg_replace('/(?:в|в\s+)?\d{1,2}[:.-]\d{2}/ui', '', $text);
-        } elseif (preg_match('/(?:в|в\s+)(\d{1,2})\s*(?:ч|час|часа|часов)?(?!\d)/ui', $text, $matches)) {
-            $hour = (int) $matches[1];
-            $minute = 0;
-            $timeFound = true;
-            $text = preg_replace('/(?:в|в\s+)\d{1,2}\s*(?:ч|час|часа|часов)?/ui', '', $text);
+        [$text, $recurrenceType, $recurrenceValue, $recurringDay] = $this->extractRecurrence($text, $locale);
+        if ($recurringDay !== null) {
+            $target = $this->moveToWeekday($target, $recurringDay, true);
+            $dateFound = true;
         }
 
-        // Есть ли вообще какой-то сигнал о дате/времени: явное время, явная/относительная дата
-        // или периодичность (для периодичности без явного времени применяется время по умолчанию).
-        $hasTemporalSignal = $timeFound || $dateFound || $isRecurring;
-
-        // Если время найдено явно — выставляем его. Для относительного "через ..." время уже
-        // вычислено сложением выше и повторно выставлять его через setTime() не нужно (и нельзя,
-        // иначе слетит перенос через полночь/сутки).
-        if ($hasTemporalSignal && ! $isRelative) {
-            $targetAt->setTime($hour, $minute, 0);
+        if ($recurrenceType === 'monthly' && $recurrenceValue !== null) {
+            $day = min((int) $recurrenceValue, $target->daysInMonth);
+            $target->day($day);
+            if ($target->lessThanOrEqualTo($now)) {
+                $target->addMonthNoOverflow()->day(min((int) $recurrenceValue, $target->daysInMonth));
+            }
+            $dateFound = true;
         }
 
-        // Считаем разбор успешным, если удалось определить точное относительное время,
-        // конкретную дату/время или периодичность повторения.
-        $success = $isRelative || $hasTemporalSignal;
+        [$text, $target, $dateFound, $relative] = $this->extractDate($text, $target, $now, $timezone, $locale, $dateFound);
+        [$text, $target, $timeFound] = $this->extractTime($text, $target, $locale, $relative);
 
-        // Если явной даты не было (только время суток) и напоминание одноразовое, а указанное
-        // время на сегодня уже прошло — переносим на завтра.
-        if ($success && ! $isRelative && ! $dateFound && $recurrenceType === 'once') {
-            if ($targetAt->isBefore($now)) {
-                $targetAt->addDay();
+        if ($recurrenceType === 'interval' && ! $timeFound && ! $relative) {
+            [$unit, $amount] = explode(':', (string) $recurrenceValue, 2);
+            $amount = max(1, (int) $amount);
+            match ($unit) {
+                'minutes' => $target->addMinutes($amount),
+                'hours' => $target->addHours($amount),
+                'weeks' => $target->addWeeks($amount),
+                default => $target->addDays($amount),
+            };
+            $relative = true;
+        }
+
+        $isRecurring = $recurrenceType !== 'once';
+        $success = $relative || $dateFound || $timeFound || $isRecurring;
+
+        if ($success && ! $relative && ! $dateFound && $timeFound && ! $isRecurring && $target->lessThanOrEqualTo($now)) {
+            $target->addDay();
+        }
+
+        if ($success && ! $relative && ! $timeFound) {
+            $target->setTime(9, 0);
+        }
+
+        $cleaned = $this->cleanTaskText($text, $locale);
+        $confidence = $this->confidence($relative, $dateFound, $timeFound, $isRecurring);
+
+        if (! $success && config('services.reminder_parser.ai_fallback', false)) {
+            $fallback = $this->fallback?->parse($input, $timezone, $locale);
+            if ($fallback !== null) {
+                return $fallback;
             }
         }
-
-        // Если не удалось распознать ни дату, ни время, ни периодичность — НЕ угадываем момент
-        // времени (например, старым способом "+1 час"). Помечаем результат как неуспешный и
-        // требующий уточнения у пользователя; $targetAt при этом остаётся текущим моментом
-        // и не должен использоваться вызывающим кодом для сохранения напоминания.
-        if (! $success) {
-            $needsClarification = true;
-        }
-
-        // Причесываем оставшийся текст (удаляем лишние пробелы, предлоги, союзы в начале)
-        $cleanedText = preg_replace('/^\s*(в|во|на|о|об|обо|к|со|с|и|да)\s+/ui', '', trim($text));
-        $cleanedText = preg_replace('/\s+/', ' ', $cleanedText);
-        $cleanedText = trim($cleanedText);
-
-        if (empty($cleanedText)) {
-            $cleanedText = 'Напоминание';
-        }
-
-        // Всегда переводим итоговую дату targetAt обратно в UTC перед записью в базу данных
-        $targetAtUtc = $targetAt->copy()->setTimezone('UTC');
 
         return new ParsedReminderDTO(
-            text: $cleanedText,
-            targetAt: $targetAtUtc,
+            text: $cleaned,
+            targetAt: $target->copy()->setTimezone('UTC'),
             recurrenceType: $recurrenceType,
             recurrenceValue: $recurrenceValue,
             success: $success,
-            needsClarification: $needsClarification,
+            needsClarification: ! $success,
+            confidence: $confidence,
+            failureReason: $success ? null : 'missing_temporal_expression',
+            locale: $locale,
         );
+    }
+
+    /** @return array{string, string, ?string, ?int} */
+    private function extractRecurrence(string $text, string $locale): array
+    {
+        $monthlyDayPattern = $locale === 'en'
+            ? '/\b(?:every month on (?:the )?)(\d{1,2})(?:st|nd|rd|th)?\b/ui'
+            : '/\b(?:каждого|ежемесячно)\s+(\d{1,2})(?:-го)?\s*(?:числа)?\b/ui';
+        if (preg_match($monthlyDayPattern, $text, $match) && (int) $match[1] <= 31) {
+            return [(string) preg_replace($monthlyDayPattern, '', $text), 'monthly', (string) (int) $match[1], null];
+        }
+
+        $patterns = $locale === 'en'
+            ? ['daily' => '/\b(?:every day|daily)\b/ui', 'workdays' => '/\b(?:on weekdays|every weekday)\b/ui', 'monthly' => '/\b(?:every month|monthly)\b/ui']
+            : ['daily' => '/(?:каждый день|ежедневно|каждые сутки)/ui', 'workdays' => '/(?:по будням|в будни|каждый будний день)/ui', 'monthly' => '/(?:каждый месяц|ежемесячно)/ui'];
+
+        foreach ($patterns as $type => $pattern) {
+            if (preg_match($pattern, $text)) {
+                return [(string) preg_replace($pattern, '', $text), $type, null, null];
+            }
+        }
+
+        $intervalPattern = $locale === 'en'
+            ? '/\bevery\s+(\d+)\s+(minutes?|hours?|days?|weeks?)\b/ui'
+            : '/каждые?\s+(\d+)\s+(минут[уы]?|час(?:а|ов)?|дн(?:я|ей)?|недел(?:ю|и|ь))/ui';
+        if (preg_match($intervalPattern, $text, $match)) {
+            $unit = mb_strtolower($match[2]);
+            $normalized = str_starts_with($unit, 'min') || str_starts_with($unit, 'мин') ? 'minutes'
+                : (str_starts_with($unit, 'hour') || str_starts_with($unit, 'час') ? 'hours'
+                    : (str_starts_with($unit, 'week') || str_starts_with($unit, 'нед') ? 'weeks' : 'days'));
+
+            return [(string) preg_replace($intervalPattern, '', $text), 'interval', "{$normalized}:{$match[1]}", null];
+        }
+
+        $foundDays = [];
+        foreach (self::WEEKDAYS[$locale] as $name => $day) {
+            $prefix = $locale === 'en' ? '(?:every|on)' : '(?:кажд(?:ый|ую)|по)';
+            if (preg_match("/{$prefix}\\s+{$name}\\b/ui", $text)) {
+                $foundDays[] = $day;
+                $text = (string) preg_replace("/{$prefix}\\s+{$name}\\b/ui", '', $text);
+            } elseif ($foundDays !== [] && preg_match("/(?:,|\\s+(?:and|и))\\s*{$name}\\b/ui", $text)) {
+                $foundDays[] = $day;
+                $text = (string) preg_replace("/(?:,|\\s+(?:and|и))\\s*{$name}\\b/ui", '', $text);
+            }
+        }
+
+        $foundDays = array_values(array_unique($foundDays));
+        sort($foundDays);
+        if ($foundDays !== []) {
+            return [$text, count($foundDays) === 1 ? 'weekly' : 'custom', implode(',', $foundDays), $foundDays[0]];
+        }
+
+        return [$text, 'once', null, null];
+    }
+
+    /** @return array{string, Carbon, bool, bool} */
+    private function extractDate(string $text, Carbon $target, Carbon $now, string $timezone, string $locale, bool $alreadyFound): array
+    {
+        $relativePattern = $locale === 'en'
+            ? '/\bin\s+(\d+)\s+(minutes?|hours?|days?|weeks?)\b/ui'
+            : '/через\s+(\d+)\s*(минут[уы]?|мин|ч|час(?:а|ов)?|дн(?:я|ей)?|день|недел(?:ю|и|ь))/ui';
+        if (preg_match($relativePattern, $text, $match)) {
+            $value = (int) $match[1];
+            $unit = mb_strtolower($match[2]);
+            match (true) {
+                str_starts_with($unit, 'min'), str_starts_with($unit, 'мин') => $target->addMinutes($value),
+                str_starts_with($unit, 'hour'), str_starts_with($unit, 'час'), $unit === 'ч' => $target->addHours($value),
+                str_starts_with($unit, 'week'), str_starts_with($unit, 'нед') => $target->addWeeks($value),
+                default => $target->addDays($value),
+            };
+
+            return [(string) preg_replace($relativePattern, '', $text), $target, true, true];
+        }
+
+        $relativeDates = $locale === 'en'
+            ? ['day after tomorrow' => 2, 'tomorrow' => 1, 'today' => 0]
+            : ['послезавтра' => 2, 'завтра' => 1, 'сегодня' => 0];
+        foreach ($relativeDates as $phrase => $days) {
+            if (preg_match('/\b'.preg_quote($phrase, '/').'\b/ui', $text)) {
+                $target->addDays($days);
+
+                return [(string) preg_replace('/\b'.preg_quote($phrase, '/').'\b/ui', '', $text), $target, true, false];
+            }
+        }
+
+        $monthNames = implode('|', array_keys(self::MONTHS));
+        $namedDate = $locale === 'en'
+            ? "/\\b({$monthNames})\\s+(\\d{1,2})(?:,?\\s+(\\d{4}))?\\b/ui"
+            : "/\\b(\\d{1,2})\\s+({$monthNames})(?:\\s+(\\d{4}))?\\b/ui";
+        if (preg_match($namedDate, $text, $match, PREG_UNMATCHED_AS_NULL)) {
+            $day = (int) ($locale === 'en' ? $match[2] : $match[1]);
+            $month = self::MONTHS[mb_strtolower($locale === 'en' ? $match[1] : $match[2])];
+            $year = $match[3] !== null ? (int) $match[3] : $now->year;
+            if (checkdate($month, $day, $year)) {
+                $candidate = Carbon::create($year, $month, $day, 0, 0, 0, $timezone);
+                if ($match[3] === null && $candidate->endOfDay()->isPast()) {
+                    $year++;
+                }
+                $target->setDate($year, $month, $day);
+
+                return [(string) preg_replace($namedDate, '', $text), $target, true, false];
+            }
+        }
+
+        if (preg_match('/\b(\d{1,2})[.\/-](\d{1,2})(?:[.\/-](\d{4}))?\b/u', $text, $match)) {
+            $day = (int) $match[1];
+            $month = (int) $match[2];
+            $year = isset($match[3]) ? (int) $match[3] : $now->year;
+            if (checkdate($month, $day, $year)) {
+                if (! isset($match[3]) && Carbon::create($year, $month, $day, 23, 59, 59, $timezone)->isPast()) {
+                    $year++;
+                }
+                $target->setDate($year, $month, $day);
+
+                return [(string) preg_replace('/\b\d{1,2}[.\/-]\d{1,2}(?:[.\/-]\d{4})?\b/u', '', $text), $target, true, false];
+            }
+        }
+
+        foreach (self::WEEKDAYS[$locale] as $name => $day) {
+            $pattern = $locale === 'en' ? "/\\b(?:on\\s+)?{$name}\\b/ui" : "/\\b(?:в(?:о)?\\s+)?{$name}\\b/ui";
+            if (preg_match($pattern, $text)) {
+                return [(string) preg_replace($pattern, '', $text), $this->moveToWeekday($target, $day), true, false];
+            }
+        }
+
+        return [$text, $target, $alreadyFound, false];
+    }
+
+    /** @return array{string, Carbon, bool} */
+    private function extractTime(string $text, Carbon $target, string $locale, bool $relative): array
+    {
+        if ($relative) {
+            return [$text, $target, true];
+        }
+
+        if ($locale === 'en' && preg_match('/\b(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/ui', $text, $match, PREG_UNMATCHED_AS_NULL)) {
+            $hour = (int) $match[1] % 12 + (mb_strtolower($match[3]) === 'pm' ? 12 : 0);
+            $target->setTime($hour, (int) ($match[2] ?? 0));
+
+            return [(string) preg_replace('/\b(?:at\s+)?\d{1,2}(?::\d{2})?\s*(?:am|pm)\b/ui', '', $text), $target, true];
+        }
+
+        if (preg_match('/(?:\b(?:в|at)\s+)?\b([01]?\d|2[0-3])[:.]([0-5]\d)\b/ui', $text, $match)) {
+            $target->setTime((int) $match[1], (int) $match[2]);
+
+            return [(string) preg_replace('/(?:\b(?:в|at)\s+)?\b(?:[01]?\d|2[0-3])[:.][0-5]\d\b/ui', '', $text), $target, true];
+        }
+
+        if (preg_match('/\b(?:в|at)\s+([01]?\d|2[0-3])(?:\s*(?:ч|час(?:а|ов)?|o’clock))?\b/ui', $text, $match)) {
+            $target->setTime((int) $match[1], 0);
+
+            return [(string) preg_replace('/\b(?:в|at)\s+(?:[01]?\d|2[0-3])(?:\s*(?:ч|час(?:а|ов)?|o’clock))?\b/ui', '', $text), $target, true];
+        }
+
+        return [$text, $target, false];
+    }
+
+    private function moveToWeekday(Carbon $target, int $day, bool $allowToday = false): Carbon
+    {
+        if ($target->dayOfWeekIso === $day && $allowToday) {
+            return $target;
+        }
+
+        do {
+            $target->addDay();
+        } while ($target->dayOfWeekIso !== $day);
+
+        return $target;
+    }
+
+    private function cleanTaskText(string $text, string $locale): string
+    {
+        $prefix = $locale === 'en' ? '/^\s*(?:to|on|at|and)\s+/ui' : '/^\s*(?:в|во|на|о|об|обо|к|со|с|и|да)\s+/ui';
+        $cleaned = trim((string) preg_replace('/\s+/', ' ', (string) preg_replace($prefix, '', trim($text))));
+
+        return $cleaned !== '' ? $cleaned : ($locale === 'en' ? 'Reminder' : 'Напоминание');
+    }
+
+    private function confidence(bool $relative, bool $date, bool $time, bool $recurring): float
+    {
+        return match (true) {
+            $relative => 1.0,
+            $date && $time => 0.98,
+            $recurring && $time => 0.95,
+            $date || $time || $recurring => 0.82,
+            default => 0.0,
+        };
     }
 }

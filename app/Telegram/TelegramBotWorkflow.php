@@ -487,7 +487,7 @@ class TelegramBotWorkflow
             return;
         }
 
-        $dto = $this->parser->parse($text, $user->timezone);
+        $dto = $this->parser->parse($text, $user->timezone, $user->language_code);
 
         if ($dto->needsClarification) {
             $this->telegram->sendMessage([
@@ -753,6 +753,14 @@ class TelegramBotWorkflow
             return;
         }
 
+        if ($user->state === UserState::ClarifyingReminder->value) {
+            $original = (string) ($user->state_data['original_text'] ?? '');
+            $this->clearState($user);
+            $this->parseAndConfirmReminder($user, trim($text.' '.$original), $chatId);
+
+            return;
+        }
+
         // Неизвестное/устаревшее значение state (не должно происходить в норме, но если
         // БД содержит значение, которое мы больше не обрабатываем, — не оставляем
         // пользователя "залипшим" в нём навсегда, а сбрасываем FSM и просим начать заново.
@@ -784,15 +792,20 @@ class TelegramBotWorkflow
             return;
         }
 
-        $dto = $this->parser->parse($text, $user->timezone);
+        $dto = $this->parser->parse($text, $user->timezone, $user->language_code);
 
         // Если дату/время не удалось уверенно распознать — не подставляем "на глаз" время
         // и не предлагаем сохранить напоминание, а просто просим уточнить формулировку.
         if ($dto->needsClarification) {
+            $user->update([
+                'state' => UserState::ClarifyingReminder->value,
+                'state_data' => ['original_text' => $dto->text],
+            ]);
             $this->telegram->sendMessage([
                 'chat_id' => $chatId,
-                'text' => "🤔 Не удалось точно определить дату и время напоминания.\n\n"
-                         .'Попробуйте переформулировать, например: <b>«завтра в 15:00 позвонить маме»</b> или <b>«через 2 часа проверить почту»</b>.',
+                'text' => $dto->locale === 'en'
+                    ? '🤔 When should I remind you? Reply with a date or time, for example: <b>tomorrow at 3:00 pm</b> or <b>in 2 hours</b>.'
+                    : '🤔 Когда напомнить? Ответьте датой или временем, например: <b>«завтра в 15:00»</b> или <b>«через 2 часа»</b>.',
             ]);
 
             return;

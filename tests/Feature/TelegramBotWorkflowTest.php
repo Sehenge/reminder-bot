@@ -3,6 +3,7 @@
 namespace Tests\Feature;
 
 use App\Models\User;
+use Carbon\Carbon;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Facades\Http;
 use Tests\TestCase;
@@ -134,7 +135,7 @@ class TelegramBotWorkflowTest extends TestCase
     /**
      * Если парсер не смог уверенно определить дату/время, бот не должен молча
      * подставлять "+1 час" и предлагать сохранить напоминание — он должен
-     * попросить пользователя уточнить формулировку и не трогать state_data.
+     * попросить пользователя уточнить дату и сохранить исходный текст для продолжения диалога.
      */
     public function test_webhook_asks_for_clarification_when_datetime_cannot_be_parsed(): void
     {
@@ -175,14 +176,47 @@ class TelegramBotWorkflowTest extends TestCase
         $response->assertStatus(200);
 
         $user->refresh();
-        $this->assertNull($user->state_data);
+        $this->assertSame('clarify_reminder', $user->state);
+        $this->assertSame('купить хлеб', $user->state_data['original_text']);
 
         Http::assertSent(function ($request) {
             return str_contains($request->url(), 'sendMessage') &&
                    $request['chat_id'] === 88889 &&
-                   str_contains($request['text'], 'Не удалось точно определить') &&
+                   str_contains($request['text'], 'Когда напомнить') &&
                    ! str_contains($request['text'], 'Создать новое напоминание?');
         });
+    }
+
+    public function test_clarification_reply_completes_original_reminder_request(): void
+    {
+        Http::fake(['api.telegram.org/*' => Http::response(['ok' => true, 'result' => []])]);
+        Carbon::setTestNow(Carbon::create(2026, 8, 19, 12, 0, 0, 'Europe/Moscow'));
+        $user = User::create([
+            'telegram_id' => 88890,
+            'first_name' => 'Alex',
+            'language_code' => 'ru',
+            'timezone' => 'Europe/Moscow',
+            'state' => 'clarify_reminder',
+            'state_data' => ['original_text' => 'купить хлеб'],
+        ]);
+
+        $payload = [
+            'update_id' => 123459,
+            'message' => [
+                'message_id' => 4,
+                'from' => ['id' => 88890, 'is_bot' => false, 'first_name' => 'Alex', 'language_code' => 'ru'],
+                'chat' => ['id' => 88890, 'type' => 'private'],
+                'date' => 1716292800,
+                'text' => 'завтра в 15:00',
+            ],
+        ];
+
+        $this->postJson(route('telegram.webhook'), $payload, $this->webhookHeaders())->assertOk();
+
+        $user->refresh();
+        $this->assertNull($user->state);
+        $this->assertSame('купить хлеб', $user->state_data['text']);
+        Http::assertSent(fn ($request) => str_contains($request['text'] ?? '', 'Создать новое напоминание?'));
     }
 
     /**

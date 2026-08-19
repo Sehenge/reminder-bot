@@ -47,4 +47,8 @@ return [
         'webhook_secret' => env('TELEGRAM_WEBHOOK_SECRET'),
     ],
 
+    'reminder_parser' => [
+        'ai_fallback' => env('REMINDER_AI_FALLBACK', false),
+    ],
+
 ];

@@ -10,6 +10,7 @@ enum RecurrenceType: string
     case Monthly = 'monthly';
     case Workdays = 'workdays';
     case Custom = 'custom';
+    case Interval = 'interval';
 
     public function label(): string
     {
@@ -20,6 +21,7 @@ enum RecurrenceType: string
             self::Monthly => 'Каждый месяц',
             self::Workdays => 'По будням',
             self::Custom => 'Повторяющееся',
+            self::Interval => 'По интервалу',
         };
     }
 }
