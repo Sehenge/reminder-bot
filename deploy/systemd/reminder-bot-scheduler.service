@@ -1,0 +1,12 @@
+[Unit]
+Description=ReminderBot Laravel scheduler run
+After=network.target
+
+[Service]
+Type=oneshot
+User=alexaidev_in_usr
+Group=alexaidev_in_usr
+WorkingDirectory=/var/www/alexaidev_in_usr/data/www/alexaidev.info
+ExecStart=/usr/bin/php artisan schedule:run --no-interaction
+StandardOutput=journal
+StandardError=journal

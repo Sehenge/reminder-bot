@@ -1,0 +1,20 @@
+[Unit]
+Description=ReminderBot Laravel queue worker
+After=network.target
+
+[Service]
+Type=simple
+User=alexaidev_in_usr
+Group=alexaidev_in_usr
+WorkingDirectory=/var/www/alexaidev_in_usr/data/www/alexaidev.info
+ExecStart=/usr/bin/php artisan queue:work database --sleep=3 --tries=3 --timeout=90 --max-time=3600
+ExecReload=/bin/kill -s USR2 $MAINPID
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=120
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
