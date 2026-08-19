@@ -7,18 +7,19 @@ use App\Actions\Reminders\CreateReminderAction;
 use App\Actions\Reminders\SnoozeReminderAction;
 use App\Actions\Reminders\UpdateReminderAction;
 use App\DTO\CallbackQueryDTO;
+use App\DTO\PreCheckoutQueryDTO;
+use App\DTO\RefundedPaymentDTO;
 use App\DTO\SuccessfulPaymentDTO;
-use App\Enums\PremiumStatus;
 use App\Enums\UserState;
-use App\Events\PremiumPurchased;
-use App\Models\PremiumSubscription;
 use App\Models\Reminder;
 use App\Models\User;
 use App\Services\NaturalLanguageParserService;
+use App\Services\PremiumPaymentService;
 use App\Services\TelegramService;
 use App\Telegram\Presenters\ReminderMessagePresenter;
 use Carbon\Carbon;
 use Illuminate\Support\Facades\Log;
+use InvalidArgumentException;
 
 class TelegramBotWorkflow
 {
@@ -44,6 +45,7 @@ class TelegramBotWorkflow
         protected SnoozeReminderAction $snoozeReminderAction,
         protected UpdateReminderAction $updateReminderAction,
         protected ReminderMessagePresenter $presenter,
+        protected PremiumPaymentService $premiumPayments,
     ) {
         $this->telegram = $telegram;
         $this->parser = $parser;
@@ -84,6 +86,12 @@ class TelegramBotWorkflow
         // Обработка платежа успешной покупки Premium (Successful Payment)
         if (isset($message['successful_payment'])) {
             $this->handleSuccessfulPayment($user, SuccessfulPaymentDTO::fromArray($message['successful_payment']));
+
+            return;
+        }
+
+        if (isset($message['refunded_payment'])) {
+            $this->handleRefundedPayment($user, RefundedPaymentDTO::fromArray($message['refunded_payment']));
 
             return;
         }
@@ -995,9 +1003,11 @@ class TelegramBotWorkflow
     protected function sendPremiumMessage(User $user, int $chatId): void
     {
         $isPremium = $user->hasPremium();
-        $statusText = $isPremium
-            ? '⭐ Ваш премиум статус: <b>Активен</b> (до '.$user->premium_expires_at->setTimezone($user->timezone)->format('d.m.Y H:i').')'
-            : '❌ Ваш премиум статус: <b>Не активен</b>';
+        $statusText = match (true) {
+            ! $isPremium => '❌ Ваш премиум статус: <b>Не активен</b>',
+            $user->premium_expires_at === null => '⭐ Ваш премиум статус: <b>Активен бессрочно</b>',
+            default => '⭐ Ваш премиум статус: <b>Активен</b> (до '.$user->premium_expires_at->setTimezone($user->timezone)->format('d.m.Y H:i').')',
+        };
 
         $text = "👑 <b>ReminderBot Premium</b>\n\n"
               ."Активируйте Premium за Telegram Stars и откройте все возможности приложения:\n\n"
@@ -1011,10 +1021,10 @@ class TelegramBotWorkflow
               ."{$statusText}\n\n"
               .'💰 Стоимость подписки: <b>50 ⭐️ (Telegram Stars)</b> в месяц.';
 
-        $buttons = [];
-        if (! $isPremium) {
-            $buttons[] = [['text' => '💳 Купить Premium за 50 ⭐️', 'callback_data' => 'buypremium']];
-        }
+        $buttons = [[[
+            'text' => $isPremium ? '💳 Продлить Premium за 50 ⭐️' : '💳 Купить Premium за 50 ⭐️',
+            'callback_data' => 'buypremium',
+        ]]];
 
         $this->telegram->sendMessage([
             'chat_id' => $chatId,
@@ -1028,15 +1038,16 @@ class TelegramBotWorkflow
      */
     protected function sendStarsInvoice(User $user, int $chatId): void
     {
+        $order = $this->premiumPayments->createPendingOrder($user);
+
         $this->telegram->sendInvoice([
             'chat_id' => $chatId,
             'title' => 'ReminderBot Premium',
             'description' => 'Активация Premium подписки на 30 дней в боте ReminderBot',
-            'payload' => "premium_subscription_{$user->id}",
-            'provider_token' => '', // Оставляем пустым для оплаты через Telegram Stars
-            'currency' => 'XTR', // Валюта Telegram Stars
+            'payload' => $order->invoice_payload,
+            'currency' => $this->premiumPayments->currency(),
             'prices' => json_encode([
-                ['label' => 'Premium 30 дней', 'amount' => 50], // Количество звезд
+                ['label' => 'Premium 30 дней', 'amount' => $this->premiumPayments->amount()],
             ]),
         ]);
     }
@@ -1046,11 +1057,28 @@ class TelegramBotWorkflow
      */
     public function handlePreCheckoutQuery(array $preCheckoutQuery): void
     {
-        $id = $preCheckoutQuery['id'];
-        // Подтверждаем, что платеж корректен
+        try {
+            $query = PreCheckoutQueryDTO::fromArray($preCheckoutQuery);
+        } catch (InvalidArgumentException) {
+            if (is_string($preCheckoutQuery['id'] ?? null) && $preCheckoutQuery['id'] !== '') {
+                $this->telegram->answerPreCheckoutQuery([
+                    'pre_checkout_query_id' => $preCheckoutQuery['id'],
+                    'ok' => false,
+                    'error_message' => 'Не удалось проверить параметры платежа. Создайте новый счёт.',
+                ]);
+            }
+
+            return;
+        }
+
+        $user = $this->premiumPayments->userForCheckout($query);
+        $accepted = $user !== null;
+        $this->premiumPayments->recordCheckout($query, $user, $accepted, $accepted ? null : 'order_mismatch');
+
         $this->telegram->answerPreCheckoutQuery([
-            'pre_checkout_query_id' => $id,
-            'ok' => true,
+            'pre_checkout_query_id' => $query->id,
+            'ok' => $accepted,
+            ...($accepted ? [] : ['error_message' => 'Параметры счёта не совпадают. Создайте новый счёт.']),
         ]);
     }
 
@@ -1059,25 +1087,42 @@ class TelegramBotWorkflow
      */
     protected function handleSuccessfulPayment(User $user, SuccessfulPaymentDTO $payment): void
     {
-        // Добавляем запись о подписке
-        $subscription = PremiumSubscription::create([
-            'user_id' => $user->id,
-            'telegram_payment_charge_id' => $payment->chargeId,
-            'stars_amount' => $payment->amount,
-            'status' => PremiumStatus::Completed->value,
-            'expires_at' => Carbon::now()->addMonth(),
-        ]);
-        PremiumPurchased::dispatch($subscription);
+        if (! $this->premiumPayments->isValidSuccessfulPayment($user, $payment)) {
+            $this->premiumPayments->recordRejectedPayment($user, $payment);
+            Log::warning('Rejected Telegram successful payment with mismatched order data.', [
+                'user_id' => $user->id,
+                'telegram_payment_charge_id' => $payment->chargeId,
+            ]);
 
-        // Обновляем статус пользователя
-        $user->update([
-            'is_premium' => true,
-            'premium_expires_at' => Carbon::now()->addMonth(),
-        ]);
+            return;
+        }
+
+        $result = $this->premiumPayments->purchase($user, $payment);
+
+        if (! $result->wasCreated) {
+            return;
+        }
 
         $this->telegram->sendMessage([
             'chat_id' => $user->telegram_id,
             'text' => "🎉 <b>Поздравляем!</b> Вы успешно приобрели подписку <b>ReminderBot Premium</b> за {$payment->amount} ⭐️!\n\nВсе ограничения сняты! Спасибо за поддержку нашего проекта! ❤️",
+        ]);
+    }
+
+    protected function handleRefundedPayment(User $user, RefundedPaymentDTO $payment): void
+    {
+        if (! $this->premiumPayments->refund($user, $payment)) {
+            Log::warning('Rejected Telegram refunded payment with unknown or mismatched charge.', [
+                'user_id' => $user->id,
+                'telegram_payment_charge_id' => $payment->chargeId,
+            ]);
+
+            return;
+        }
+
+        $this->telegram->sendMessage([
+            'chat_id' => $user->telegram_id,
+            'text' => 'Возврат Premium обработан. Срок доступа был пересчитан.',
         ]);
     }
 }
