@@ -27,8 +27,9 @@ install -m 0644 "${UNIT_SOURCE}/reminder-bot-scheduler.service" "${UNIT_TARGET}/
 install -m 0644 "${UNIT_SOURCE}/reminder-bot-scheduler.timer" "${UNIT_TARGET}/reminder-bot-scheduler.timer"
 
 systemctl daemon-reload
-systemctl enable --now reminder-bot-queue.service
-systemctl enable --now reminder-bot-scheduler.timer
+systemctl enable reminder-bot-queue.service reminder-bot-scheduler.timer
+systemctl restart reminder-bot-queue.service
+systemctl restart reminder-bot-scheduler.timer
 
 systemctl --no-pager --full status reminder-bot-queue.service
 systemctl --no-pager --full status reminder-bot-scheduler.timer
