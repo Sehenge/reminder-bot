@@ -24,8 +24,13 @@ final class NaturalLanguageParserService
 
     public function parse(string $input, string $timezone = 'UTC', string $language = 'ru'): ParsedReminderDTO
     {
-        $locale = str_starts_with(mb_strtolower($language), 'en') ? 'en' : 'ru';
-        $text = trim((string) preg_replace('/^(напомни(?:ть)?|remind\s+me(?:\s+to)?|remind)\s+/ui', '', trim($input)));
+        // Telegram's profile language describes the client UI, not necessarily the
+        // language of a particular message. Prefer the script used in the message so
+        // an English-profile user can still create reminders in Russian.
+        $locale = preg_match('/[а-яё]/ui', $input) === 1
+            ? 'ru'
+            : (str_starts_with(mb_strtolower($language), 'en') ? 'en' : 'ru');
+        $text = trim((string) preg_replace('/^(напомни(?:ть)?(?:\s+мне)?|remind\s+me(?:\s+to)?|remind)\s+/ui', '', trim($input)));
         $now = Carbon::now($timezone);
         $target = $now->copy();
         $recurrenceType = 'once';
@@ -184,7 +189,7 @@ final class NaturalLanguageParserService
         $monthNames = implode('|', array_keys(self::MONTHS));
         $namedDate = $locale === 'en'
             ? "/\\b({$monthNames})\\s+(\\d{1,2})(?:,?\\s+(\\d{4}))?\\b/ui"
-            : "/\\b(\\d{1,2})\\s+({$monthNames})(?:\\s+(\\d{4}))?\\b/ui";
+            : "/\\b(\\d{1,2})\\s+({$monthNames})(?:\\s+(\\d{4})(?:\\s+г(?:од(?:а)?)?\\.? )?)?\\b/uix";
         if (preg_match($namedDate, $text, $match, PREG_UNMATCHED_AS_NULL)) {
             $day = (int) ($locale === 'en' ? $match[2] : $match[1]);
             $month = self::MONTHS[mb_strtolower($locale === 'en' ? $match[1] : $match[2])];

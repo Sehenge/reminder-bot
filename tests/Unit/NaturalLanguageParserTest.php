@@ -43,6 +43,26 @@ class NaturalLanguageParserTest extends TestCase
         $this->assertEquals('once', $dto->recurrenceType);
     }
 
+    public function test_russian_message_overrides_english_telegram_profile_language(): void
+    {
+        Carbon::setTestNow(Carbon::create(2026, 8, 21, 23, 31, 0, 'Europe/Moscow'));
+
+        $dto = $this->parser->parse(
+            'Напомни мне 21 ноября 2026 года проверить дату выхода Solo Leveling: Beyond the System и новости о третьем сезоне.',
+            'Europe/Moscow',
+            'en'
+        );
+
+        $this->assertTrue($dto->success);
+        $this->assertFalse($dto->needsClarification);
+        $this->assertSame('ru', $dto->locale);
+        $this->assertSame(
+            'проверить дату выхода Solo Leveling: Beyond the System и новости о третьем сезоне.',
+            $dto->text
+        );
+        $this->assertSame('2026-11-21 06:00:00 UTC', $dto->targetAt->format('Y-m-d H:i:s T'));
+    }
+
     /**
      * Тест парсинга точного времени "завтра в 15:30"
      */
