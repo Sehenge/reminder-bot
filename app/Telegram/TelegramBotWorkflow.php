@@ -712,14 +712,9 @@ class TelegramBotWorkflow
         $text = "📚 <b>Справка по командам ReminderBot</b>\n\n"
               ."/start — Запустить бота и получить приветствие\n"
               ."/help — Список всех команд и примеры использования\n"
-              ."/list — Показать список активных и выполненных напоминаний\n"
+              ."/list — Показать список активных напоминаний\n"
               ."/premium — Анонс будущих возможностей Premium\n"
               ."/timezone — Настройка часового пояса\n\n"
-              ."/categories — Категории Premium\n"
-              ."/tags — Теги Premium\n"
-              ."/history — История изменений за 6 месяцев\n"
-              ."/shared — Совместные списки\n"
-              ."/calendar — Персональная ссылка iCal\n\n"
               ."🤖 <b>Примеры фраз для создания напоминания:</b>\n"
               ."• <i>«Напомни выпить витамины в 21:00»</i>\n"
               ."• <i>«Завтра в 14:30 визит к стоматологу»</i>\n"
@@ -1348,7 +1343,7 @@ class TelegramBotWorkflow
     private function runPremiumCommand(User $user, int $chatId, callable $command): void
     {
         if (! $user->hasPremium()) {
-            $this->sendText($chatId, 'Эта функция доступна в Premium. Используйте /premium для подключения.');
+            $this->sendText($chatId, 'Эта функция будет доступна в Premium, который сейчас готовится к запуску. Подробности: /premium.');
 
             return;
         }
