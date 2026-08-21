@@ -174,6 +174,12 @@ class TelegramBotWorkflowTest extends TestCase
         $this->assertEquals('сходить в спортзал', $user->state_data['text']);
         $this->assertEquals('once', $user->state_data['recurrence_type']);
 
+        Http::assertSent(function ($request) {
+            return str_contains($request->url(), 'sendChatAction')
+                && $request['chat_id'] === 88888
+                && $request['action'] === 'typing';
+        });
+
         // Проверяем отправку сообщения подтверждения
         Http::assertSent(function ($request) {
             return str_contains($request->url(), 'sendMessage') &&

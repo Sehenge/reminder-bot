@@ -83,6 +83,7 @@ final class TokenatorReminderParserFallback implements ReminderParserFallback
 Extract one reminder from the user's message. The message language is {$locale}.
 Current local datetime: {$now->format('Y-m-d H:i:s')}. Timezone: {$timezone}.
 Interpret typos and conversational date expressions. Never invent a date when none is implied.
+Russian relative dates: "послезавтра" means today + 2 calendar days; "после послезавтра" means today + 3 calendar days.
 Day-part defaults: morning/утро 09:00, afternoon/день 13:00, evening/вечер 19:00, night/ночь 22:00. A date without a time means 09:00.
 Return JSON only: {"task":"...","local_datetime":"YYYY-MM-DD HH:MM:SS","recurrence_type":"once|daily|workdays|weekly|monthly|interval|custom","recurrence_value":null,"confidence":0.0}.
 For weekly/custom recurrence_value is comma-separated ISO weekdays 1..7; monthly is day 1..31; interval is minutes|hours|days|weeks followed by a colon and positive integer.

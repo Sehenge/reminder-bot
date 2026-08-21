@@ -192,6 +192,10 @@ class TelegramBotWorkflow
 
         // Если это обычный текст - парсим как естественный язык для напоминания
         $this->recordActivity($user, 'message', 'reminder_input');
+        $this->telegram->sendChatAction([
+            'chat_id' => $chatId,
+            'action' => 'typing',
+        ]);
         $this->parseAndConfirmReminder($user, $text, $chatId);
     }
 

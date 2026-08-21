@@ -43,6 +43,14 @@ class TelegramService
     }
 
     /**
+     * Показывает нативный индикатор «печатает…» в Telegram.
+     */
+    public function sendChatAction(array $params): array
+    {
+        return $this->call('sendChatAction', $params);
+    }
+
+    /**
      * Ответ на Callback Query
      */
     public function answerCallbackQuery(array $params): array
