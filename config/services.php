@@ -50,6 +50,14 @@ return [
 
     'reminder_parser' => [
         'ai_fallback' => env('REMINDER_AI_FALLBACK', false),
+        'base_url' => env('REMINDER_AI_BASE_URL', 'https://api.tokenator.top/v1'),
+        'api_key' => env('REMINDER_AI_API_KEY'),
+        'models' => array_values(array_filter(array_map(
+            'trim',
+            explode(',', (string) env('REMINDER_AI_MODELS', 'doubao-seed-2.0-lite,free-gemini-3.7-flash'))
+        ))),
+        'timeout' => (int) env('REMINDER_AI_TIMEOUT', 10),
+        'min_confidence' => (float) env('REMINDER_AI_MIN_CONFIDENCE', 0.75),
     ],
 
 ];
