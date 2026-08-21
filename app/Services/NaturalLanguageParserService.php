@@ -83,7 +83,11 @@ final class NaturalLanguageParserService
 
         $cleaned = $this->cleanTaskText($text, $locale);
         $confidence = $this->confidence($relative, $dateFound, $timeFound, $isRecurring);
-        if ($success && ($preferAi || $this->hasUnparsedTemporalExpression($cleaned, $locale))) {
+        if ($success && (
+            $preferAi
+            || $this->hasUnparsedTemporalExpression($cleaned, $locale)
+            || $this->hasUnparsedTimeQualifier($text, $locale, $dateFound, $timeFound)
+        )) {
             $success = false;
             $confidence = 0.0;
         }
@@ -325,6 +329,27 @@ final class NaturalLanguageParserService
         $pattern = $locale === 'en'
             ? '/\bin\s+(?:\d+|[a-z-]+(?:\s+[a-z-]+)?)\s+(?:minutes?|hours?|days?|weeks?|months?|years?)\b/ui'
             : '/\bчерез\s+(?:\d+|[а-яё-]+(?:\s+[а-яё-]+)?)\s*(?:минут\w*|час\w*|д(?:ень|ня|ней)|сут\w*|недел\w*|месяц\w*|год\w*)\b/ui';
+
+        return preg_match($pattern, $text) === 1;
+    }
+
+    private function hasUnparsedTimeQualifier(
+        string $text,
+        string $locale,
+        bool $dateFound,
+        bool $timeFound
+    ): bool {
+        if (! $dateFound || $timeFound) {
+            return false;
+        }
+
+        // A date followed by an unresolved connector usually contains a
+        // conversational time qualifier ("tomorrow at lunch", "завтра в обед").
+        // Let the AI interpret the whole phrase instead of growing a language-
+        // specific dictionary and silently defaulting to 09:00.
+        $pattern = $locale === 'en'
+            ? '/^\s*(?:at|around|by|near)\b/ui'
+            : '/^\s*(?:в|во|к|около|примерно)\b/ui';
 
         return preg_match($pattern, $text) === 1;
     }

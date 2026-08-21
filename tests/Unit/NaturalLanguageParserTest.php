@@ -118,6 +118,26 @@ class NaturalLanguageParserTest extends TestCase
         $this->assertTrue($dto->needsClarification);
     }
 
+    #[DataProvider('unknownTimeQualifierProvider')]
+    public function test_routes_unknown_time_qualifier_to_fallback(string $input, string $locale): void
+    {
+        Carbon::setTestNow(Carbon::create(2026, 8, 22, 0, 25, 0, 'Europe/Moscow'));
+
+        $dto = $this->parser->parse($input, 'Europe/Moscow', $locale);
+
+        $this->assertFalse($dto->success);
+        $this->assertTrue($dto->needsClarification);
+    }
+
+    public static function unknownTimeQualifierProvider(): array
+    {
+        return [
+            'Russian lunch' => ['Напомни завтра в обед проверить рекламу', 'ru'],
+            'Russian noon' => ['Напомни завтра около полудня проверить рекламу', 'ru'],
+            'English lunch' => ['Remind me tomorrow around lunchtime to check ads', 'en'],
+        ];
+    }
+
     public function test_russian_message_overrides_english_telegram_profile_language(): void
     {
         Carbon::setTestNow(Carbon::create(2026, 8, 21, 23, 31, 0, 'Europe/Moscow'));
