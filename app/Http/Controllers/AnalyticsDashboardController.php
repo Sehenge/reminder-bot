@@ -6,6 +6,7 @@ use App\Models\Reminder;
 use App\Models\User;
 use App\Models\UserActivityEvent;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Symfony\Component\HttpFoundation\Response;
 
 class AnalyticsDashboardController extends Controller
@@ -38,16 +39,48 @@ class AnalyticsDashboardController extends Controller
                 'users' => User::query()->whereDate('created_at', $date)->count(),
                 'active' => UserActivityEvent::query()->whereDate('created_at', $date)->distinct()->count('user_id'),
                 'events' => UserActivityEvent::query()->whereDate('created_at', $date)->count(),
+                'reminders' => Reminder::query()->whereDate('created_at', $date)->count(),
             ];
         });
+
+        $users = User::query()->count();
+        $engaged = User::query()->whereHas('activityEvents', fn ($query) => $query
+            ->where(fn ($events) => $events->where('event_type', '!=', 'command')->orWhere('event_name', '!=', '/start')))->count();
+        $activated = User::query()->has('reminders')->count();
+        $repeatUsers = User::query()->has('reminders', '>=', 2)->count();
+        $returned = User::query()->whereHas('activityEvents', function ($query): void {
+            $createdAfterDay = DB::connection()->getDriverName() === 'sqlite'
+                ? "datetime(users.created_at, '+1 day')"
+                : 'date_add(users.created_at, interval 1 day)';
+
+            $query->whereRaw("user_activity_events.created_at >= {$createdAfterDay}");
+        })->count();
+
+        $sources = User::query()
+            ->leftJoin('reminders', 'reminders.user_id', '=', 'users.id')
+            ->selectRaw("coalesce(users.acquisition_source, 'без метки') as source")
+            ->selectRaw('count(distinct users.id) as users')
+            ->selectRaw('count(distinct case when reminders.id is not null then users.id end) as activated')
+            ->groupBy('users.acquisition_source')
+            ->orderByDesc('users')
+            ->get();
 
         return response()->view('analytics.dashboard', [
             'generatedAt' => $now,
             'totals' => [
-                'users' => User::query()->count(),
+                'users' => $users,
                 'newToday' => User::query()->where('created_at', '>=', $today)->count(),
                 'activeToday' => UserActivityEvent::query()->where('created_at', '>=', $today)->distinct()->count('user_id'),
                 'reminders' => Reminder::query()->count(),
+                'activationRate' => $users > 0 ? round($activated / $users * 100, 1) : 0,
+                'returnRate' => $users > 0 ? round($returned / $users * 100, 1) : 0,
+            ],
+            'funnel' => [
+                ['label' => 'Запустили бота', 'value' => $users],
+                ['label' => 'Сделали действие', 'value' => $engaged],
+                ['label' => 'Создали напоминание', 'value' => $activated],
+                ['label' => 'Создали 2+ напоминания', 'value' => $repeatUsers],
+                ['label' => 'Вернулись спустя сутки', 'value' => $returned],
             ],
             'daily' => $daily,
             'commands' => UserActivityEvent::query()->where('event_type', 'command')->where('created_at', '>=', $week)
@@ -59,8 +92,7 @@ class AnalyticsDashboardController extends Controller
             'activityTypes' => UserActivityEvent::query()->where('created_at', '>=', $week)
                 ->selectRaw('event_type, count(*) as total')
                 ->groupBy('event_type')->orderByDesc('total')->get(),
-            'sources' => User::query()->selectRaw("coalesce(acquisition_source, 'без метки') as source, count(*) as users")
-                ->groupBy('acquisition_source')->orderByDesc('users')->get(),
+            'sources' => $sources,
             'recent' => UserActivityEvent::query()->with('user:id,telegram_id,username,first_name,last_name')
                 ->latest()->limit(100)->get(),
         ])->header('Cache-Control', 'no-store, private');

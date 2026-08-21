@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Models\Reminder;
 use App\Models\User;
 use App\Models\UserActivityEvent;
 use Illuminate\Foundation\Testing\RefreshDatabase;
@@ -37,6 +38,11 @@ class AnalyticsDashboardTest extends TestCase
             'event_name' => '/start',
             'source' => 'telegram_august',
         ]);
+        Reminder::query()->create([
+            'user_id' => $user->id,
+            'text' => 'Проверить конверсию',
+            'target_at' => now()->addDay(),
+        ]);
 
         $this->get(route('analytics.dashboard'))->assertUnauthorized();
         $this->withBasicAuth('owner', 'secret')->get(route('analytics.dashboard'))
@@ -44,6 +50,9 @@ class AnalyticsDashboardTest extends TestCase
             ->assertSee('Рост и активность за 7 дней')
             ->assertSee('Типы активности за 7 дней')
             ->assertSee('Источники пользователей')
+            ->assertSee('Воронка использования')
+            ->assertSee('Конверсия источников')
+            ->assertSee('100%')
             ->assertSee('/start')
             ->assertSee('telegram_august');
     }
