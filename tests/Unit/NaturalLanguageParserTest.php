@@ -102,6 +102,22 @@ class NaturalLanguageParserTest extends TestCase
         $this->assertSame('missing_temporal_expression', $dto->failureReason);
     }
 
+    public function test_routes_ambiguous_relative_date_composition_to_fallback(): void
+    {
+        Carbon::setTestNow(Carbon::create(2026, 8, 22, 0, 25, 0, 'Europe/Moscow'));
+
+        $dto = $this->parser->parse(
+            'Напомни после послезавтра вечером проверить календарь',
+            'Europe/Moscow',
+            'ru'
+        );
+
+        // Без настроенного AI безопаснее переспросить, чем частично распознать
+        // "послезавтра" и создать напоминание на неверные +2 дня.
+        $this->assertFalse($dto->success);
+        $this->assertTrue($dto->needsClarification);
+    }
+
     public function test_russian_message_overrides_english_telegram_profile_language(): void
     {
         Carbon::setTestNow(Carbon::create(2026, 8, 21, 23, 31, 0, 'Europe/Moscow'));

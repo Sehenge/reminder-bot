@@ -30,6 +30,7 @@ final class NaturalLanguageParserService
         $locale = preg_match('/[а-яё]/ui', $input) === 1
             ? 'ru'
             : (str_starts_with(mb_strtolower($language), 'en') ? 'en' : 'ru');
+        $preferAi = $this->requiresAiInterpretation($input, $locale);
         $text = trim((string) preg_replace('/^(напомни(?:ть)?(?:\s+мне)?|remind\s+me(?:\s+to)?|remind)\s+/ui', '', trim($input)));
         $now = Carbon::now($timezone);
         $target = $now->copy();
@@ -82,7 +83,7 @@ final class NaturalLanguageParserService
 
         $cleaned = $this->cleanTaskText($text, $locale);
         $confidence = $this->confidence($relative, $dateFound, $timeFound, $isRecurring);
-        if ($success && $this->hasUnparsedTemporalExpression($cleaned, $locale)) {
+        if ($success && ($preferAi || $this->hasUnparsedTemporalExpression($cleaned, $locale))) {
             $success = false;
             $confidence = 0.0;
         }
@@ -326,5 +327,14 @@ final class NaturalLanguageParserService
             : '/\bчерез\s+(?:\d+|[а-яё-]+(?:\s+[а-яё-]+)?)\s*(?:минут\w*|час\w*|д(?:ень|ня|ней)|сут\w*|недел\w*|месяц\w*|год\w*)\b/ui';
 
         return preg_match($pattern, $text) === 1;
+    }
+
+    private function requiresAiInterpretation(string $text, string $locale): bool
+    {
+        if ($locale !== 'ru') {
+            return false;
+        }
+
+        return preg_match('/\bпосле\s+после[\s-]*завтр[ао]\b/ui', $text) === 1;
     }
 }
