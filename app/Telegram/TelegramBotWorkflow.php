@@ -102,6 +102,10 @@ class TelegramBotWorkflow
         // чтобы отражать актуальные username/имя/фамилию/язык пользователя.
         $this->syncTelegramProfile($user, $message['from']);
 
+        if ($user->wasRecentlyCreated) {
+            $this->notifyAboutNewUser($user);
+        }
+
         // Обработка платежа успешной покупки Premium (Successful Payment)
         if (isset($message['successful_payment'])) {
             $this->handleSuccessfulPayment($user, SuccessfulPaymentDTO::fromArray($message['successful_payment']));
@@ -183,6 +187,26 @@ class TelegramBotWorkflow
         // Если это обычный текст - парсим как естественный язык для напоминания
         $this->recordActivity($user, 'message', 'reminder_input');
         $this->parseAndConfirmReminder($user, $text, $chatId);
+    }
+
+    private function notifyAboutNewUser(User $user): void
+    {
+        $chatId = config('services.telegram.new_user_notification_chat_id');
+
+        if ($chatId === null || $chatId === '') {
+            return;
+        }
+
+        $name = trim(implode(' ', array_filter([$user->first_name, $user->last_name])));
+        $username = $user->username ? '@'.$user->username : '—';
+
+        $this->telegram->sendMessage([
+            'chat_id' => $chatId,
+            'text' => "🐾 <b>Новый пользователь!</b>\n"
+                .'Имя: '.e($name !== '' ? $name : '—')."\n"
+                .'Username: '.e($username)."\n"
+                .'Telegram ID: '.$user->telegram_id,
+        ]);
     }
 
     /**

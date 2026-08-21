@@ -12,6 +12,13 @@ class TelegramBotWorkflowTest extends TestCase
 {
     use RefreshDatabase;
 
+    protected function setUp(): void
+    {
+        parent::setUp();
+
+        config(['services.telegram.new_user_notification_chat_id' => null]);
+    }
+
     /**
      * Заголовки с корректным секретом вебхука, ожидаемым в тестовом окружении
      * (см. TELEGRAM_WEBHOOK_SECRET в phpunit.xml).
@@ -23,6 +30,44 @@ class TelegramBotWorkflowTest extends TestCase
         return [
             'X-Telegram-Bot-Api-Secret-Token' => 'test-secret-token',
         ];
+    }
+
+    public function test_owner_is_notified_only_when_user_is_created(): void
+    {
+        config(['services.telegram.new_user_notification_chat_id' => '424242']);
+
+        Http::fake([
+            'api.telegram.org/*' => Http::response(['ok' => true, 'result' => []], 200),
+        ]);
+
+        $payload = [
+            'update_id' => 700001,
+            'message' => [
+                'message_id' => 1,
+                'from' => [
+                    'id' => 70001,
+                    'is_bot' => false,
+                    'first_name' => 'Мурзик',
+                    'username' => 'new_cat',
+                    'language_code' => 'ru',
+                ],
+                'chat' => ['id' => 70001, 'type' => 'private'],
+                'date' => 1716292800,
+                'text' => '/start',
+            ],
+        ];
+
+        $this->postJson(route('telegram.webhook'), $payload, $this->webhookHeaders())->assertOk();
+
+        $payload['update_id']++;
+        $payload['message']['message_id']++;
+        $payload['message']['text'] = '/help';
+        $this->postJson(route('telegram.webhook'), $payload, $this->webhookHeaders())->assertOk();
+
+        Http::assertSentCount(3);
+        Http::assertSent(fn ($request) => $request['chat_id'] === '424242'
+            && str_contains($request['text'], 'Новый пользователь')
+            && str_contains($request['text'], '@new_cat'));
     }
 
     /**

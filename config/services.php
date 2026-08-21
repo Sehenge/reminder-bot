@@ -38,6 +38,7 @@ return [
     'telegram' => [
         'bot_token' => env('TELEGRAM_BOT_TOKEN'),
         'bot_username' => env('TELEGRAM_BOT_USERNAME', 'ReminderBot'),
+        'new_user_notification_chat_id' => env('TELEGRAM_NEW_USER_NOTIFICATION_CHAT_ID'),
 
         // Секрет для проверки заголовка X-Telegram-Bot-Api-Secret-Token на входящих
         // запросах вебхука. Задайте тот же секрет при регистрации вебхука через
