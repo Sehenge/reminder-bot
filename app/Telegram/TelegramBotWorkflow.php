@@ -18,6 +18,7 @@ use App\Models\ReminderHistory;
 use App\Models\SharedList;
 use App\Models\Tag;
 use App\Models\User;
+use App\Models\UserActivityEvent;
 use App\Services\CalendarExportService;
 use App\Services\CategoryService;
 use App\Services\NaturalLanguageParserService;
@@ -116,6 +117,7 @@ class TelegramBotWorkflow
 
         // Если пользователь находится в каком-то состоянии FSM (например, ждет ввода часового пояса или категории)
         if ($user->state) {
+            $this->recordActivity($user, 'message', 'state_input');
             $this->handleUserState($user, $text, $chatId);
 
             return;
@@ -128,6 +130,10 @@ class TelegramBotWorkflow
             $commandToken = explode(' ', $text, 2)[0];
             $command = explode('@', $commandToken)[0];
             $arguments = trim(substr($text, strlen($commandToken)));
+            $this->recordActivity($user, 'command', mb_strtolower($command), $command === '/start' ? $arguments : null);
+            if ($command === '/start' && $arguments !== '' && $user->acquisition_source === null) {
+                $user->update(['acquisition_source' => mb_substr($arguments, 0, 100)]);
+            }
             switch ($command) {
                 case '/start':
                     $this->sendStartMessage($user, $chatId);
@@ -175,6 +181,7 @@ class TelegramBotWorkflow
         }
 
         // Если это обычный текст - парсим как естественный язык для напоминания
+        $this->recordActivity($user, 'message', 'reminder_input');
         $this->parseAndConfirmReminder($user, $text, $chatId);
     }
 
@@ -217,6 +224,7 @@ class TelegramBotWorkflow
         $callback = CallbackQueryDTO::fromData((string) $data);
         $action = $callback->action;
         $parts = array_merge([$action], $callback->arguments);
+        $this->recordActivity($user, 'callback', $action);
 
         switch ($action) {
             case 'complete': // Отметить выполненным / подтвердить текущее срабатывание повторяющегося
@@ -266,8 +274,8 @@ class TelegramBotWorkflow
                 ]);
                 break;
 
-            case 'buypremium': // Покупка Премиум через Stars
-                $this->sendStarsInvoice($user, $chatId);
+            case 'buypremium': // Анонс будущих возможностей Premium
+                $this->sendPremiumMessage($user, $chatId);
                 break;
 
             case 'list': // Кнопка "Мои напоминания" (callback_data: list_active)
@@ -328,6 +336,16 @@ class TelegramBotWorkflow
                 ]);
                 break;
         }
+    }
+
+    private function recordActivity(User $user, string $type, string $name, ?string $source = null): void
+    {
+        UserActivityEvent::query()->create([
+            'user_id' => $user->id,
+            'event_type' => $type,
+            'event_name' => mb_substr($name, 0, 100),
+            'source' => $source !== null && $source !== '' ? mb_substr($source, 0, 100) : null,
+        ]);
     }
 
     /**
@@ -695,8 +713,7 @@ class TelegramBotWorkflow
               ."/start — Запустить бота и получить приветствие\n"
               ."/help — Список всех команд и примеры использования\n"
               ."/list — Показать список активных и выполненных напоминаний\n"
-              ."/premium — Подписка Премиум и покупка за Telegram Stars\n"
-              ."/paysupport — Помощь с оплатой и возвратами\n"
+              ."/premium — Анонс будущих возможностей Premium\n"
               ."/timezone — Настройка часового пояса\n\n"
               ."/categories — Категории Premium\n"
               ."/tags — Теги Premium\n"
@@ -711,10 +728,8 @@ class TelegramBotWorkflow
               ."• <i>«Каждый понедельник в 9:00 созвон»</i> (Повторяющееся)\n"
               ."• <i>«По будням в 8:00 проснуться»</i> (Повторяющееся)\n"
               ."• <i>«Через 30 минут вытащить пирог»</i>\n\n"
-              ."👑 <b>Преимущества Премиума:</b>\n"
-              ."• Неограниченное количество напоминаний (без Премиума — макс. 30)\n"
-              ."• Совместные списки задач и групп\n"
-              .'• Приоритетная поддержка и отсутствие рекламы';
+              ."👑 <b>Premium готовится:</b>\n"
+              .'сейчас проект бесплатный, а подробнее о будущих возможностях можно узнать по команде /premium.';
 
         $this->telegram->sendMessage([
             'chat_id' => $chatId,
@@ -836,10 +851,10 @@ class TelegramBotWorkflow
         if (! $user->canCreateReminder()) {
             $this->telegram->sendMessage([
                 'chat_id' => $chatId,
-                'text' => "⚠️ <b>Достигнут лимит напоминаний!</b>\n\nВ бесплатной версии можно создавать не более 30 активных напоминаний.\n\nПриобретите Premium за Telegram Stars, чтобы убрать все ограничения!",
+                'text' => "⚠️ <b>Достигнут лимит напоминаний!</b>\n\nСейчас можно создавать не более 30 активных напоминаний. Мы готовим Premium с расширенными лимитами и дополнительными возможностями — подробности появятся позже.",
                 'reply_markup' => json_encode([
                     'inline_keyboard' => [
-                        [['text' => '⭐ Активировать Premium за Stars', 'callback_data' => 'buypremium']],
+                        [['text' => '👑 Что планируется в Premium', 'callback_data' => 'buypremium']],
                     ],
                 ]),
             ]);
@@ -1068,32 +1083,26 @@ class TelegramBotWorkflow
     {
         $isPremium = $user->hasPremium();
         $statusText = match (true) {
-            ! $isPremium => '❌ Ваш премиум статус: <b>Не активен</b>',
+            ! $isPremium => '⏳ Статус Premium: <b>готовится к запуску</b>',
             $user->premium_expires_at === null => '⭐ Ваш премиум статус: <b>Активен бессрочно</b>',
             default => '⭐ Ваш премиум статус: <b>Активен</b> (до '.$user->premium_expires_at->setTimezone($user->timezone)->format('d.m.Y H:i').')',
         };
 
-        $text = "👑 <b>ReminderBot Premium</b>\n\n"
-              ."Активируйте Premium за Telegram Stars и откройте все возможности приложения:\n\n"
-              ."🚀 <b>Преимущества Premium:</b>\n"
-              ."• <b>Безлимитные напоминания</b> (убирает лимит в 30 активных задач)\n"
-              ."• <b>Совместные списки</b> и группы для совместного ведения задач\n"
-              ."• <b>Категории и теги</b> с красивой цветовой маркировкой задач\n"
-              ."• <b>Web-дашборд</b> — удобный интерфейс в браузере\n"
-              ."• <b>Экспорт в CSV / iCal</b> — сохранение задач в календарь\n"
-              ."• <b>История на 6 месяцев</b>\n\n"
-              ."{$statusText}\n\n"
-              .'💰 Стоимость подписки: <b>50 ⭐️ (Telegram Stars)</b> в месяц.';
-
-        $buttons = [[[
-            'text' => $isPremium ? '💳 Продлить Premium за 50 ⭐️' : '💳 Купить Premium за 50 ⭐️',
-            'callback_data' => 'buypremium',
-        ]]];
+        $text = "👑 <b>ReminderBot Premium — скоро</b>\n\n"
+              ."Сейчас проект работает бесплатно, а Premium пока находится в разработке. Покупать или подключать ничего не нужно.\n\n"
+              ."✨ <b>Что мы планируем добавить:</b>\n"
+              ."• больше активных напоминаний;\n"
+              ."• совместные списки для семьи и команды;\n"
+              ."• категории, теги и удобные фильтры;\n"
+              ."• расширенную историю изменений;\n"
+              ."• синхронизацию с календарём и экспорт;\n"
+              ."• дополнительные инструменты для организации задач.\n\n"
+              ."Мы обязательно сообщим, когда Premium будет готов. А пока пользуйтесь ReminderBot — основные возможности доступны бесплатно 💙\n\n"
+              ."{$statusText}";
 
         $this->telegram->sendMessage([
             'chat_id' => $chatId,
             'text' => $text,
-            'reply_markup' => json_encode(['inline_keyboard' => $buttons]),
         ]);
     }
 

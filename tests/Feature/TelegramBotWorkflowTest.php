@@ -68,6 +68,11 @@ class TelegramBotWorkflowTest extends TestCase
             'first_name' => 'John',
         ]);
 
+        $this->assertDatabaseHas('user_activity_events', [
+            'event_type' => 'command',
+            'event_name' => '/start',
+        ]);
+
         // Проверяем, что к Telegram API был сделан исходящий запрос sendMessage
         Http::assertSent(function ($request) {
             return str_contains($request->url(), 'sendMessage') &&
@@ -346,6 +351,43 @@ class TelegramBotWorkflowTest extends TestCase
                    $request['chat_id'] === $user->telegram_id &&
                    str_contains($request['text'], 'нет активных напоминаний');
         });
+    }
+
+    public function test_premium_callback_shows_coming_soon_message_without_invoice(): void
+    {
+        Http::fake([
+            'api.telegram.org/*' => Http::response(['ok' => true, 'result' => []], 200),
+        ]);
+
+        User::create([
+            'telegram_id' => 11112,
+            'first_name' => 'Premium Preview',
+            'timezone' => 'Europe/Moscow',
+        ]);
+
+        $payload = [
+            'update_id' => 700006,
+            'callback_query' => [
+                'id' => 'cbq-premium-preview',
+                'from' => [
+                    'id' => 11112,
+                    'is_bot' => false,
+                    'first_name' => 'Premium Preview',
+                ],
+                'message' => [
+                    'message_id' => 24,
+                    'chat' => ['id' => 11112, 'type' => 'private'],
+                ],
+                'data' => 'buypremium',
+            ],
+        ];
+
+        $this->postJson(route('telegram.webhook'), $payload, $this->webhookHeaders())->assertOk();
+
+        Http::assertSent(fn ($request): bool => str_contains($request->url(), 'sendMessage')
+            && str_contains($request['text'], 'Сейчас проект работает бесплатно')
+            && str_contains($request['text'], 'Premium пока находится в разработке'));
+        Http::assertNotSent(fn ($request): bool => str_contains($request->url(), 'sendInvoice'));
     }
 
     /**

@@ -18,6 +18,7 @@ class User extends Model
         'first_name',
         'last_name',
         'language_code',
+        'acquisition_source',
         'timezone',
         'is_premium',
         'premium_expires_at',
@@ -39,6 +40,12 @@ class User extends Model
     public function reminders(): HasMany
     {
         return $this->hasMany(Reminder::class);
+    }
+
+    /** @return HasMany<UserActivityEvent, $this> */
+    public function activityEvents(): HasMany
+    {
+        return $this->hasMany(UserActivityEvent::class);
     }
 
     /**

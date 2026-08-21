@@ -1,5 +1,6 @@
 <?php
 
+use App\Http\Controllers\AnalyticsDashboardController;
 use App\Http\Controllers\CalendarFeedController;
 use App\Http\Controllers\TelegramWebhookController;
 use Illuminate\Support\Facades\Route;
@@ -18,3 +19,6 @@ Route::post('/webhook/telegram', TelegramWebhookController::class)->name('telegr
 Route::get('/calendar/{token}.ics', CalendarFeedController::class)
     ->where('token', '[A-Za-z0-9]{48}')
     ->name('calendar.feed');
+
+Route::get('/'.trim((string) config('analytics.path'), '/'), AnalyticsDashboardController::class)
+    ->name('analytics.dashboard');
