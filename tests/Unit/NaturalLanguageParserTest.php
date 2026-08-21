@@ -63,6 +63,30 @@ class NaturalLanguageParserTest extends TestCase
         $this->assertSame('2026-11-21 06:00:00 UTC', $dto->targetAt->format('Y-m-d H:i:s T'));
     }
 
+    #[DataProvider('russianDayPartProvider')]
+    public function test_parses_russian_day_parts(string $input, string $expectedLocalTime): void
+    {
+        Carbon::setTestNow(Carbon::create(2026, 8, 21, 12, 0, 0, 'Europe/Moscow'));
+
+        $dto = $this->parser->parse($input, 'Europe/Moscow', 'ru');
+
+        $this->assertTrue($dto->success);
+        $this->assertFalse($dto->needsClarification);
+        $this->assertSame('проверить новости', $dto->text);
+        $this->assertSame($expectedLocalTime, $dto->targetAt->setTimezone('Europe/Moscow')->format('Y-m-d H:i'));
+    }
+
+    public static function russianDayPartProvider(): array
+    {
+        return [
+            'завтра утром' => ['Напомни мне завтра утром проверить новости', '2026-08-22 09:00'],
+            'послезавтра днём' => ['Напомни мне послезавтра днём проверить новости', '2026-08-23 13:00'],
+            'послезавтра днем' => ['Напомни мне послезавтра днем проверить новости', '2026-08-23 13:00'],
+            'завтра вечером' => ['Напомни мне завтра вечером проверить новости', '2026-08-22 19:00'],
+            'завтра ночью' => ['Напомни мне завтра ночью проверить новости', '2026-08-22 22:00'],
+        ];
+    }
+
     /**
      * Тест парсинга точного времени "завтра в 15:30"
      */

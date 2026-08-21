@@ -236,6 +236,18 @@ final class NaturalLanguageParserService
             return [$text, $target, true];
         }
 
+        $dayParts = $locale === 'en'
+            ? ['morning' => 9, 'afternoon' => 13, 'evening' => 19, 'night' => 22]
+            : ['утром' => 9, 'днём' => 13, 'днем' => 13, 'вечером' => 19, 'ночью' => 22];
+        foreach ($dayParts as $phrase => $hour) {
+            $pattern = '/\\b'.preg_quote($phrase, '/').'\\b/ui';
+            if (preg_match($pattern, $text)) {
+                $target->setTime($hour, 0);
+
+                return [(string) preg_replace($pattern, '', $text), $target, true];
+            }
+        }
+
         if ($locale === 'en' && preg_match('/\b(?:at\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/ui', $text, $match, PREG_UNMATCHED_AS_NULL)) {
             $hour = (int) $match[1] % 12 + (mb_strtolower($match[3]) === 'pm' ? 12 : 0);
             $target->setTime($hour, (int) ($match[2] ?? 0));
