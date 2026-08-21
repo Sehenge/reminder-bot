@@ -43,6 +43,45 @@ class NaturalLanguageParserTest extends TestCase
         $this->assertEquals('once', $dto->recurrenceType);
     }
 
+    #[DataProvider('relativeWithoutNumericAmountProvider')]
+    public function test_parses_relative_period_without_numeric_amount(
+        string $input,
+        string $expectedLocalDateTime,
+        string $expectedText
+    ): void {
+        Carbon::setTestNow(Carbon::create(2026, 8, 22, 0, 19, 0, 'Europe/Moscow'));
+
+        $dto = $this->parser->parse($input, 'Europe/Moscow', 'ru');
+
+        $this->assertTrue($dto->success);
+        $this->assertSame($expectedText, $dto->text);
+        $this->assertSame(
+            $expectedLocalDateTime,
+            $dto->targetAt->setTimezone('Europe/Moscow')->format('Y-m-d H:i')
+        );
+    }
+
+    public static function relativeWithoutNumericAmountProvider(): array
+    {
+        return [
+            'через неделю вечером' => [
+                'Напомни через неделю вечером полить цветы пожалуйста',
+                '2026-08-29 19:00',
+                'полить цветы пожалуйста',
+            ],
+            'через пару дней' => [
+                'Напомни через пару дней купить корм коту',
+                '2026-08-24 00:19',
+                'купить корм коту',
+            ],
+            'через час' => [
+                'Напомни через час проверить духовку',
+                '2026-08-22 01:19',
+                'проверить духовку',
+            ],
+        ];
+    }
+
     public function test_russian_message_overrides_english_telegram_profile_language(): void
     {
         Carbon::setTestNow(Carbon::create(2026, 8, 21, 23, 31, 0, 'Europe/Moscow'));

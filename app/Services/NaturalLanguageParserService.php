@@ -160,10 +160,11 @@ final class NaturalLanguageParserService
     private function extractDate(string $text, Carbon $target, Carbon $now, string $timezone, string $locale, bool $alreadyFound): array
     {
         $relativePattern = $locale === 'en'
-            ? '/\bin\s+(\d+)\s+(minutes?|hours?|days?|weeks?)\b/ui'
-            : '/через\s+(\d+)\s*(минут[уы]?|мин|ч|час(?:а|ов)?|дн(?:я|ей)?|день|недел(?:ю|и|ь))/ui';
+            ? '/\bin\s+(?:(\d+|a|an|a couple of)\s+)?(minutes?|hours?|days?|weeks?)\b/ui'
+            : '/через\s+(?:(\d+|пару)\s*)?(минут[уы]?|мин|час(?:а|ов)?|ч|дн(?:я|ей)?|день|сутки|недел(?:ю|и|ь))/ui';
         if (preg_match($relativePattern, $text, $match)) {
-            $value = (int) $match[1];
+            $amount = mb_strtolower((string) ($match[1] ?? ''));
+            $value = ctype_digit($amount) ? (int) $amount : (in_array($amount, ['пару', 'a couple of'], true) ? 2 : 1);
             $unit = mb_strtolower($match[2]);
             match (true) {
                 str_starts_with($unit, 'min'), str_starts_with($unit, 'мин') => $target->addMinutes($value),
@@ -238,10 +239,6 @@ final class NaturalLanguageParserService
     /** @return array{string, Carbon, bool} */
     private function extractTime(string $text, Carbon $target, string $locale, bool $relative): array
     {
-        if ($relative) {
-            return [$text, $target, true];
-        }
-
         $dayParts = $locale === 'en'
             ? ['morning' => 9, 'afternoon' => 13, 'evening' => 19, 'night' => 22]
             : ['утром' => 9, 'днём' => 13, 'днем' => 13, 'вечером' => 19, 'ночью' => 22];
@@ -273,7 +270,10 @@ final class NaturalLanguageParserService
             return [(string) preg_replace('/\b(?:в|at)\s+(?:[01]?\d|2[0-3])(?:\s*(?:ч|час(?:а|ов)?|o’clock))?\b/ui', '', $text), $target, true];
         }
 
-        return [$text, $target, false];
+        // A relative duration already carries an exact target. Preserve it when no
+        // explicit clock time/day part follows, but allow "через неделю вечером" to
+        // override the inherited current time with the requested evening default.
+        return [$text, $target, $relative];
     }
 
     private function moveToWeekday(Carbon $target, int $day, bool $allowToday = false): Carbon
