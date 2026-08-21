@@ -14,8 +14,7 @@ Artisan::command('inspire', function () {
 // резервирование статуса pending -> dispatching внутри самой команды.
 Schedule::command('reminders:dispatch')
     ->everyMinute()
-    ->withoutOverlapping()
-    ->runInBackground();
+    ->withoutOverlapping();
 
 Schedule::command('reminders:prune-history')
     ->dailyAt('03:30')
