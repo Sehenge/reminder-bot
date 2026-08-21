@@ -175,14 +175,20 @@ final class NaturalLanguageParserService
             return [(string) preg_replace($relativePattern, '', $text), $target, true, true];
         }
 
+        // Keep typo tolerance restricted to temporal vocabulary: correcting the whole
+        // task text could silently change names, titles or the reminder itself.
         $relativeDates = $locale === 'en'
-            ? ['day after tomorrow' => 2, 'tomorrow' => 1, 'today' => 0]
-            : ['послезавтра' => 2, 'завтра' => 1, 'сегодня' => 0];
-        foreach ($relativeDates as $phrase => $days) {
-            if (preg_match('/\b'.preg_quote($phrase, '/').'\b/ui', $text)) {
+            ? ['/\bday\s+after\s+tomorrow\b/ui' => 2, '/\btomorrow\b/ui' => 1, '/\btoday\b/ui' => 0]
+            : [
+                '/\bпосле[\s-]*завтр[ао]\b/ui' => 2,
+                '/\bзавтр[ао]\b/ui' => 1,
+                '/\b(?:сегодня|севодня|сигодня|сегодна)\b/ui' => 0,
+            ];
+        foreach ($relativeDates as $pattern => $days) {
+            if (preg_match($pattern, $text)) {
                 $target->addDays($days);
 
-                return [(string) preg_replace('/\b'.preg_quote($phrase, '/').'\b/ui', '', $text), $target, true, false];
+                return [(string) preg_replace($pattern, '', $text), $target, true, false];
             }
         }
 
