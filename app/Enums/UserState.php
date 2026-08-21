@@ -8,4 +8,5 @@ enum UserState: string
     case EditingText = 'edit_text';
     case EditingTime = 'edit_time';
     case ClarifyingReminder = 'clarify_reminder';
+    case WaitingForSupport = 'wait_support';
 }

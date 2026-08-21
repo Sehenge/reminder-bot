@@ -154,6 +154,12 @@ class TelegramBotWorkflow
                 case '/paysupport':
                     $this->handlePaymentSupport($user, $chatId, $arguments);
                     break;
+                case '/support':
+                    $this->handleSupportCommand($user, $chatId, $arguments);
+                    break;
+                case '/reply':
+                    $this->handleSupportReply($user, $chatId, $arguments);
+                    break;
                 case '/timezone':
                     $this->askTimezone($user, $chatId);
                     break;
@@ -738,6 +744,7 @@ class TelegramBotWorkflow
               ."/help — Список всех команд и примеры использования\n"
               ."/list — Показать список активных напоминаний\n"
               ."/premium — Анонс будущих возможностей Premium\n"
+              ."/support — Написать в поддержку\n"
               ."/timezone — Настройка часового пояса\n\n"
               ."🤖 <b>Примеры фраз для создания напоминания:</b>\n"
               ."• <i>«Напомни выпить витамины в 21:00»</i>\n"
@@ -806,6 +813,13 @@ class TelegramBotWorkflow
      */
     protected function handleUserState(User $user, string $text, int $chatId): void
     {
+        if ($user->state === UserState::WaitingForSupport->value) {
+            $this->clearState($user);
+            $this->sendSupportRequest($user, $chatId, $text);
+
+            return;
+        }
+
         if ($user->state === UserState::WaitingForTimezone->value) {
             // Пробуем распознать введенный часовой пояс
             try {
@@ -1382,6 +1396,99 @@ class TelegramBotWorkflow
     private function sendText(int $chatId, string $text): void
     {
         $this->telegram->sendMessage(['chat_id' => $chatId, 'text' => $text]);
+    }
+
+    private function handleSupportCommand(User $user, int $chatId, string $message): void
+    {
+        if ($message !== '') {
+            $this->sendSupportRequest($user, $chatId, $message);
+
+            return;
+        }
+
+        $user->update([
+            'state' => UserState::WaitingForSupport->value,
+            'state_data' => null,
+        ]);
+
+        $this->sendText(
+            $chatId,
+            "Опишите вопрос одним сообщением. Оно будет передано поддержке через бота.\n\nНе отправляйте пароли, коды подтверждения или данные банковской карты.",
+        );
+    }
+
+    private function sendSupportRequest(User $user, int $chatId, string $message): void
+    {
+        $message = trim($message);
+        if ($message === '' || mb_strlen($message) > 2000) {
+            $this->sendText($chatId, 'Сообщение должно содержать от 1 до 2000 символов. Введите /support и попробуйте снова.');
+
+            return;
+        }
+
+        $adminChatId = config('services.telegram.new_user_notification_chat_id');
+        if ($adminChatId === null || $adminChatId === '') {
+            Log::warning('Support request could not be delivered: admin chat is not configured.', [
+                'user_id' => $user->id,
+            ]);
+            $this->sendText($chatId, 'Поддержка временно недоступна. Пожалуйста, попробуйте позже.');
+
+            return;
+        }
+
+        $name = trim(implode(' ', array_filter([$user->first_name, $user->last_name])));
+        $username = $user->username ? '@'.$user->username : '—';
+        $result = $this->telegram->sendMessage([
+            'chat_id' => $adminChatId,
+            'text' => "📨 <b>Новое обращение в поддержку</b>\n"
+                .'Пользователь: '.e($name !== '' ? $name : '—')."\n"
+                .'Username: '.e($username)."\n"
+                .'Telegram ID: '.$user->telegram_id."\n\n"
+                .'<b>Сообщение:</b> '.e($message)."\n\n"
+                .'<code>/reply '.$user->telegram_id.' текст ответа</code>',
+        ]);
+
+        if (($result['ok'] ?? false) !== true) {
+            $this->sendText($chatId, 'Не удалось отправить обращение. Пожалуйста, попробуйте позже.');
+
+            return;
+        }
+
+        $this->sendText($chatId, '✅ Сообщение отправлено в поддержку. Ответ придёт сюда от имени бота.');
+    }
+
+    private function handleSupportReply(User $admin, int $chatId, string $arguments): void
+    {
+        $adminChatId = config('services.telegram.new_user_notification_chat_id');
+        if ($adminChatId === null || (string) $admin->telegram_id !== (string) $adminChatId) {
+            $this->sendText($chatId, '❌ Команда недоступна.');
+
+            return;
+        }
+
+        if (! preg_match('/^(\d+)\s+(.+)$/su', trim($arguments), $matches)) {
+            $this->sendText($chatId, 'Формат: <code>/reply TELEGRAM_ID текст ответа</code>');
+
+            return;
+        }
+
+        $recipient = User::query()->where('telegram_id', (int) $matches[1])->first();
+        $reply = trim($matches[2]);
+        if (! $recipient || $reply === '' || mb_strlen($reply) > 2000) {
+            $this->sendText($chatId, 'Пользователь не найден или ответ длиннее 2000 символов.');
+
+            return;
+        }
+
+        $result = $this->telegram->sendMessage([
+            'chat_id' => $recipient->telegram_id,
+            'text' => "💬 <b>Ответ поддержки:</b>\n\n".e($reply),
+        ]);
+
+        $this->sendText(
+            $chatId,
+            ($result['ok'] ?? false) === true ? '✅ Ответ отправлен.' : '❌ Telegram не доставил ответ.',
+        );
     }
 
     private function handlePaymentSupport(User $user, int $chatId, string $message): void
