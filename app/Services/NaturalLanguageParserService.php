@@ -82,6 +82,10 @@ final class NaturalLanguageParserService
 
         $cleaned = $this->cleanTaskText($text, $locale);
         $confidence = $this->confidence($relative, $dateFound, $timeFound, $isRecurring);
+        if ($success && $this->hasUnparsedTemporalExpression($cleaned, $locale)) {
+            $success = false;
+            $confidence = 0.0;
+        }
 
         if (! $success && config('services.reminder_parser.ai_fallback', false)) {
             $fallback = $this->fallback?->parse($input, $timezone, $locale);
@@ -160,11 +164,18 @@ final class NaturalLanguageParserService
     private function extractDate(string $text, Carbon $target, Carbon $now, string $timezone, string $locale, bool $alreadyFound): array
     {
         $relativePattern = $locale === 'en'
-            ? '/\bin\s+(?:(\d+|a|an|a couple of)\s+)?(minutes?|hours?|days?|weeks?)\b/ui'
-            : '/через\s+(?:(\d+|пару)\s*)?(минут[уы]?|мин|час(?:а|ов)?|ч|дн(?:я|ей)?|день|сутки|недел(?:ю|и|ь))/ui';
+            ? '/\bin\s+(?:(\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten|a couple of)\s+)?(minutes?|hours?|days?|weeks?)\b/ui'
+            : '/через\s+(?:(\d+|пару|од(?:ин|на|ну)|дв[ае]|три|четыре|пять|шесть|семь|восемь|девять|десять)\s*)?(минут[уы]?|мин|час(?:а|ов)?|ч|дн(?:я|ей)?|день|сутки|недел(?:ю|и|ь))/ui';
         if (preg_match($relativePattern, $text, $match)) {
             $amount = mb_strtolower((string) ($match[1] ?? ''));
-            $value = ctype_digit($amount) ? (int) $amount : (in_array($amount, ['пару', 'a couple of'], true) ? 2 : 1);
+            $wordNumbers = [
+                'a' => 1, 'an' => 1, 'one' => 1, 'один' => 1, 'одна' => 1, 'одну' => 1,
+                'two' => 2, 'пару' => 2, 'a couple of' => 2, 'два' => 2, 'две' => 2,
+                'three' => 3, 'три' => 3, 'four' => 4, 'четыре' => 4, 'five' => 5, 'пять' => 5,
+                'six' => 6, 'шесть' => 6, 'seven' => 7, 'семь' => 7, 'eight' => 8, 'восемь' => 8,
+                'nine' => 9, 'девять' => 9, 'ten' => 10, 'десять' => 10,
+            ];
+            $value = ctype_digit($amount) ? (int) $amount : ($wordNumbers[$amount] ?? 1);
             $unit = mb_strtolower($match[2]);
             match (true) {
                 str_starts_with($unit, 'min'), str_starts_with($unit, 'мин') => $target->addMinutes($value),
@@ -306,5 +317,14 @@ final class NaturalLanguageParserService
             $date || $time || $recurring => 0.82,
             default => 0.0,
         };
+    }
+
+    private function hasUnparsedTemporalExpression(string $text, string $locale): bool
+    {
+        $pattern = $locale === 'en'
+            ? '/\bin\s+(?:\d+|[a-z-]+(?:\s+[a-z-]+)?)\s+(?:minutes?|hours?|days?|weeks?|months?|years?)\b/ui'
+            : '/\bчерез\s+(?:\d+|[а-яё-]+(?:\s+[а-яё-]+)?)\s*(?:минут\w*|час\w*|д(?:ень|ня|ней)|сут\w*|недел\w*|месяц\w*|год\w*)\b/ui';
+
+        return preg_match($pattern, $text) === 1;
     }
 }

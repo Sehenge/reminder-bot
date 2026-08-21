@@ -74,12 +74,32 @@ class NaturalLanguageParserTest extends TestCase
                 '2026-08-24 00:19',
                 'купить корм коту',
             ],
+            'через две недели вечером' => [
+                'Напомни через две недели вечером полить цветы пожалуйста',
+                '2026-09-05 19:00',
+                'полить цветы пожалуйста',
+            ],
             'через час' => [
                 'Напомни через час проверить духовку',
                 '2026-08-22 01:19',
                 'проверить духовку',
             ],
         ];
+    }
+
+    public function test_does_not_accept_partial_parse_with_unconsumed_temporal_expression(): void
+    {
+        Carbon::setTestNow(Carbon::create(2026, 8, 22, 0, 22, 0, 'Europe/Moscow'));
+
+        $dto = $this->parser->parse(
+            'Напомни через несколько недель вечером проверить календарь',
+            'Europe/Moscow',
+            'ru'
+        );
+
+        $this->assertFalse($dto->success);
+        $this->assertTrue($dto->needsClarification);
+        $this->assertSame('missing_temporal_expression', $dto->failureReason);
     }
 
     public function test_russian_message_overrides_english_telegram_profile_language(): void
