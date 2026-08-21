@@ -59,6 +59,14 @@ class TelegramService
     }
 
     /**
+     * Отправка опроса в чат или канал.
+     */
+    public function sendPoll(array $params): array
+    {
+        return $this->call('sendPoll', $params);
+    }
+
+    /**
      * Подтверждение предварительной проверки платежа (PreCheckoutQuery)
      */
     public function answerPreCheckoutQuery(array $params): array
