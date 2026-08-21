@@ -56,6 +56,9 @@ class AnalyticsDashboardController extends Controller
             'callbacks' => UserActivityEvent::query()->where('event_type', 'callback')->where('created_at', '>=', $week)
                 ->selectRaw('event_name, count(*) as total, count(distinct user_id) as users')
                 ->groupBy('event_name')->orderByDesc('total')->limit(30)->get(),
+            'activityTypes' => UserActivityEvent::query()->where('created_at', '>=', $week)
+                ->selectRaw('event_type, count(*) as total')
+                ->groupBy('event_type')->orderByDesc('total')->get(),
             'sources' => User::query()->selectRaw("coalesce(acquisition_source, 'без метки') as source, count(*) as users")
                 ->groupBy('acquisition_source')->orderByDesc('users')->get(),
             'recent' => UserActivityEvent::query()->with('user:id,telegram_id,username,first_name,last_name')

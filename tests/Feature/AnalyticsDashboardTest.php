@@ -41,6 +41,9 @@ class AnalyticsDashboardTest extends TestCase
         $this->get(route('analytics.dashboard'))->assertUnauthorized();
         $this->withBasicAuth('owner', 'secret')->get(route('analytics.dashboard'))
             ->assertOk()
+            ->assertSee('Рост и активность за 7 дней')
+            ->assertSee('Типы активности за 7 дней')
+            ->assertSee('Источники пользователей')
             ->assertSee('/start')
             ->assertSee('telegram_august');
     }
